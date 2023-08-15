@@ -2,6 +2,7 @@ use {
     bincode::{deserialize, serialize},
     crossbeam_channel::{unbounded, Receiver, Sender},
     futures::{future, prelude::stream::StreamExt},
+    solana_accounts_db::transaction_results::TransactionExecutionResult,
     solana_banks_interface::{
         Banks, BanksRequest, BanksResponse, BanksTransactionResultWithMetadata,
         BanksTransactionResultWithSimulation, TransactionConfirmationStatus, TransactionMetadata,
@@ -9,7 +10,7 @@ use {
     },
     solana_client::connection_cache::ConnectionCache,
     solana_runtime::{
-        bank::{Bank, TransactionExecutionResult, TransactionSimulationResult},
+        bank::{Bank, TransactionSimulationResult},
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
     },
@@ -178,7 +179,6 @@ fn simulate_transaction(
         MessageHash::Compute,
         Some(false), // is_simple_vote_tx
         bank,
-        true, // require_static_program_ids
     ) {
         Err(err) => {
             return BanksTransactionResultWithSimulation {
@@ -330,7 +330,6 @@ impl Banks for BanksServer {
             MessageHash::Compute,
             Some(false), // is_simple_vote_tx
             bank.as_ref(),
-            true, // require_static_program_ids
         ) {
             Ok(tx) => tx,
             Err(err) => return Some(Err(err)),
@@ -412,8 +411,8 @@ impl Banks for BanksServer {
     async fn get_fee_for_message_with_commitment_and_context(
         self,
         _: Context,
-        commitment: CommitmentLevel,
         message: Message,
+        commitment: CommitmentLevel,
     ) -> Option<u64> {
         let bank = self.bank(commitment);
         let sanitized_message = SanitizedMessage::try_from(message).ok()?;

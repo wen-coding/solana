@@ -51,13 +51,13 @@ impl SnapshotPackagerService {
             .spawn(move || {
                 info!("SnapshotPackagerService has started");
                 renice_this_thread(snapshot_config.packager_thread_niceness_adj).unwrap();
-                let mut snapshot_gossip_manager = enable_gossip_push.then(||
+                let mut snapshot_gossip_manager = enable_gossip_push.then(|| {
                     SnapshotGossipManager::new(
                         cluster_info,
                         max_full_snapshot_hashes,
                         starting_snapshot_hashes,
                     )
-                );
+                });
 
                 loop {
                     if exit.load(Ordering::Relaxed) {
@@ -68,7 +68,11 @@ impl SnapshotPackagerService {
                         snapshot_package,
                         num_outstanding_snapshot_packages,
                         num_re_enqueued_snapshot_packages,
-                    )) = Self::get_next_snapshot_package(&snapshot_package_sender, &snapshot_package_receiver) else {
+                    )) = Self::get_next_snapshot_package(
+                        &snapshot_package_sender,
+                        &snapshot_package_receiver,
+                    )
+                    else {
                         std::thread::sleep(Self::LOOP_LIMITER);
                         continue;
                     };
@@ -102,7 +106,8 @@ impl SnapshotPackagerService {
                         measure_us!(snapshot_utils::purge_bank_snapshots_older_than_slot(
                             &snapshot_config.bank_snapshots_dir,
                             snapshot_package.slot(),
-                        )).1
+                        ))
+                        .1
                     });
 
                     datapoint_info!(
@@ -119,7 +124,11 @@ impl SnapshotPackagerService {
                         ),
                         ("enqueued_time_us", enqueued_time.as_micros(), i64),
                         ("handling_time_us", handling_time_us, i64),
-                        ("purge_old_snapshots_time_us", purge_bank_snapshots_time_us, i64),
+                        (
+                            "purge_old_snapshots_time_us",
+                            purge_bank_snapshots_time_us,
+                            i64
+                        ),
                     );
                 }
                 info!("SnapshotPackagerService has stopped");
@@ -195,6 +204,7 @@ mod tests {
         rand::seq::SliceRandom,
         solana_runtime::{
             snapshot_archive_info::SnapshotArchiveInfo,
+            snapshot_bank_utils,
             snapshot_hash::SnapshotHash,
             snapshot_package::{SnapshotPackage, SnapshotType},
             snapshot_utils::{self, ArchiveFormat, SnapshotVersion},
@@ -244,7 +254,7 @@ mod tests {
         let num_snapshots = 1;
 
         let genesis_config = GenesisConfig::default();
-        let bank = snapshot_utils::create_snapshot_dirs_for_tests(
+        let bank = snapshot_bank_utils::create_snapshot_dirs_for_tests(
             &genesis_config,
             &bank_snapshots_dir,
             num_snapshots,
@@ -256,7 +266,7 @@ mod tests {
         let snapshot_storages = bank.get_snapshot_storages(None);
         let archive_format = ArchiveFormat::TarBzip2;
 
-        let full_archive = snapshot_utils::package_and_archive_full_snapshot(
+        let full_archive = snapshot_bank_utils::package_and_archive_full_snapshot(
             &bank,
             &bank_snapshot_info,
             full_snapshot_archives_dir,

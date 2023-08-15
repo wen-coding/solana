@@ -81,7 +81,7 @@ fn verify_reachable_ports(
     };
     let mut udp_sockets = vec![&node.sockets.gossip, &node.sockets.repair];
 
-    if verify_address(&node.info.serve_repair().ok()) {
+    if verify_address(&node.info.serve_repair(Protocol::UDP).ok()) {
         udp_sockets.push(&node.sockets.serve_repair);
     }
     if verify_address(&node.info.tpu(Protocol::UDP).ok()) {
@@ -99,9 +99,6 @@ fn verify_reachable_ports(
         udp_sockets.extend(node.sockets.tvu.iter());
         udp_sockets.extend(node.sockets.broadcast.iter());
         udp_sockets.extend(node.sockets.retransmit_sockets.iter());
-    }
-    if verify_address(&node.info.tvu_forwards().ok()) {
-        udp_sockets.extend(node.sockets.tvu_forwards.iter());
     }
 
     let mut tcp_listeners = vec![];
@@ -171,7 +168,7 @@ fn start_gossip_node(
         gossip_validators,
         should_check_duplicate_instance,
         None,
-        &gossip_exit_flag,
+        gossip_exit_flag.clone(),
     );
     (cluster_info, gossip_exit_flag, gossip_service)
 }
@@ -970,7 +967,11 @@ fn build_known_snapshot_hashes<'a>(
     }
 
     'to_next_node: for node in nodes {
-        let Some(SnapshotHash {full: full_snapshot_hash, incr: incremental_snapshot_hash}) = get_snapshot_hashes_for_node(node) else {
+        let Some(SnapshotHash {
+            full: full_snapshot_hash,
+            incr: incremental_snapshot_hash,
+        }) = get_snapshot_hashes_for_node(node)
+        else {
             continue 'to_next_node;
         };
 

@@ -1,7 +1,14 @@
-#![allow(clippy::integer_arithmetic)]
 use {
     crate::snapshot_utils::create_tmp_accounts_dir_for_tests,
     log::*,
+    solana_accounts_db::{
+        accounts_db::{
+            AccountShrinkThreshold, CalcAccountsHashDataSource, INCLUDE_SLOT_IN_HASH_TESTS,
+        },
+        accounts_hash::CalcAccountsHashConfig,
+        accounts_index::AccountSecondaryIndexes,
+        epoch_accounts_hash::EpochAccountsHash,
+    },
     solana_core::{
         accounts_hash_verifier::AccountsHashVerifier,
         snapshot_packager_service::SnapshotPackagerService,
@@ -12,17 +19,12 @@ use {
             AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService, DroppedSlotsReceiver,
             PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
-        accounts_db::{
-            AccountShrinkThreshold, CalcAccountsHashDataSource, INCLUDE_SLOT_IN_HASH_TESTS,
-        },
-        accounts_hash::CalcAccountsHashConfig,
-        accounts_index::AccountSecondaryIndexes,
-        bank::{Bank, BankTestConfig},
+        bank::{epoch_accounts_hash_utils, Bank, BankTestConfig},
         bank_forks::BankForks,
-        epoch_accounts_hash::{self, EpochAccountsHash},
         genesis_utils::{self, GenesisConfigInfo},
         runtime_config::RuntimeConfig,
         snapshot_archive_info::SnapshotArchiveInfoGetter,
+        snapshot_bank_utils,
         snapshot_config::SnapshotConfig,
         snapshot_utils,
     },
@@ -90,13 +92,15 @@ impl TestEnvironment {
 
     #[must_use]
     fn _new(snapshot_config: SnapshotConfig) -> TestEnvironment {
+        const MINT_LAMPORTS: u64 = 100_000 * LAMPORTS_PER_SOL;
+        const STAKE_LAMPORTS: u64 = 100 * LAMPORTS_PER_SOL;
         let bank_snapshots_dir = TempDir::new().unwrap();
         let full_snapshot_archives_dir = TempDir::new().unwrap();
         let incremental_snapshot_archives_dir = TempDir::new().unwrap();
         let mut genesis_config_info = genesis_utils::create_genesis_config_with_leader(
-            100_000 * LAMPORTS_PER_SOL, // mint_lamports
-            &Pubkey::new_unique(),      // validator_pubkey
-            100 * LAMPORTS_PER_SOL,     // validator_stake_lamports
+            MINT_LAMPORTS,
+            &Pubkey::new_unique(),
+            STAKE_LAMPORTS,
         );
         genesis_config_info.genesis_config.epoch_schedule =
             EpochSchedule::custom(Self::SLOTS_PER_EPOCH, Self::SLOTS_PER_EPOCH, false);
@@ -138,7 +142,7 @@ impl TestEnvironment {
         assert!(bank
             .feature_set
             .is_active(&feature_set::epoch_accounts_hash::id()));
-        assert!(epoch_accounts_hash::is_enabled_this_epoch(&bank));
+        assert!(epoch_accounts_hash_utils::is_enabled_this_epoch(&bank));
 
         bank.set_startup_verification_complete();
 
@@ -266,13 +270,13 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
         .genesis_config
         .epoch_schedule
         .slots_per_epoch;
-    for _ in 0..slots_per_epoch * NUM_EPOCHS_TO_TEST {
+    for _ in 0..slots_per_epoch.checked_mul(NUM_EPOCHS_TO_TEST).unwrap() {
         let bank = {
             let parent = bank_forks.read().unwrap().working_bank();
             let bank = bank_forks.write().unwrap().insert(Bank::new_from_parent(
                 &parent,
                 &Pubkey::default(),
-                parent.slot() + 1,
+                parent.slot().checked_add(1).unwrap(),
             ));
 
             let transaction = system_transaction::transfer(
@@ -289,7 +293,7 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
         trace!("new bank {}", bank.slot());
 
         // Set roots so that ABS requests are sent (this is what requests EAH calculations)
-        if bank.slot() % SET_ROOT_INTERVAL == 0 {
+        if bank.slot().checked_rem(SET_ROOT_INTERVAL).unwrap() == 0 {
             trace!("rooting bank {}", bank.slot());
             bank_forks.write().unwrap().set_root(
                 bank.slot(),
@@ -302,7 +306,7 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
 
         // To ensure EAH calculations are correct, calculate the accounts hash here, in-band.
         // This will be the expected EAH that gets saved into the "stop" bank.
-        if bank.slot() == epoch_accounts_hash::calculation_start(&bank) {
+        if bank.slot() == epoch_accounts_hash_utils::calculation_start(&bank) {
             bank.freeze();
             let (accounts_hash, _) = bank
                 .rc
@@ -330,7 +334,7 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
         }
 
         // Test: Ensure that the "stop" bank has the correct EAH
-        if bank.slot() == epoch_accounts_hash::calculation_stop(&bank) {
+        if bank.slot() == epoch_accounts_hash_utils::calculation_stop(&bank) {
             // Sometimes AHV does not get scheduled to run, which causes the test to fail
             // spuriously.  Sleep a bit here to ensure AHV gets a chance to run.
             std::thread::sleep(Duration::from_secs(1));
@@ -378,7 +382,7 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
         .genesis_config
         .epoch_schedule
         .slots_per_epoch;
-    for _ in 0..slots_per_epoch * NUM_EPOCHS_TO_TEST {
+    for _ in 0..slots_per_epoch.checked_mul(NUM_EPOCHS_TO_TEST).unwrap() {
         let bank = {
             let parent = bank_forks.read().unwrap().working_bank();
             let bank = bank_forks.write().unwrap().insert(Bank::new_from_parent(
@@ -412,7 +416,7 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
 
         // After submitting an EAH calculation request, wait until it gets handled by ABS so that
         // subsequent snapshot requests are not swallowed.
-        if bank.slot() == epoch_accounts_hash::calculation_start(&bank) {
+        if bank.slot() == epoch_accounts_hash_utils::calculation_start(&bank) {
             while bank.epoch_accounts_hash().is_none() {
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -438,7 +442,7 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
             };
 
             let (_tmp_dir, accounts_dir) = create_tmp_accounts_dir_for_tests();
-            let deserialized_bank = snapshot_utils::bank_from_snapshot_archives(
+            let deserialized_bank = snapshot_bank_utils::bank_from_snapshot_archives(
                 &[accounts_dir],
                 &snapshot_config.bank_snapshots_dir,
                 &full_snapshot_archive_info,
@@ -455,7 +459,7 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
                 true,
                 None,
                 None,
-                &Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
             )
             .unwrap()
             .0;
@@ -494,7 +498,7 @@ fn test_background_services_request_handling_for_epoch_accounts_hash() {
         .genesis_config
         .epoch_schedule
         .slots_per_epoch;
-    for _ in 0..slots_per_epoch * NUM_EPOCHS_TO_TEST {
+    for _ in 0..slots_per_epoch.checked_mul(NUM_EPOCHS_TO_TEST).unwrap() {
         let bank = {
             let parent = bank_forks.read().unwrap().working_bank();
             let bank = bank_forks.write().unwrap().insert(Bank::new_from_parent(
@@ -518,7 +522,7 @@ fn test_background_services_request_handling_for_epoch_accounts_hash() {
 
         // Based on the EAH start and snapshot interval, pick a slot to mass-root all the banks in
         // this range such that an EAH request will be sent and also a snapshot request.
-        let eah_start_slot = epoch_accounts_hash::calculation_start(&bank);
+        let eah_start_slot = epoch_accounts_hash_utils::calculation_start(&bank);
         let set_root_slot = next_multiple_of(eah_start_slot, FULL_SNAPSHOT_INTERVAL);
 
         if bank.block_height() == set_root_slot {
@@ -575,7 +579,7 @@ fn test_epoch_accounts_hash_and_warping() {
 
     // Ensure warping past the EAH stop slot is OK
     info!("Warping past EAH stop slot...");
-    let eah_stop_offset = epoch_accounts_hash::calculation_offset_stop(&bank);
+    let eah_stop_offset = epoch_accounts_hash_utils::calculation_offset_stop(&bank);
     let eah_stop_slot_in_next_epoch =
         epoch_schedule.get_first_slot_in_epoch(bank.epoch() + 1) + eah_stop_offset;
     // have to set root here so that we can flush the write cache
@@ -587,11 +591,7 @@ fn test_epoch_accounts_hash_and_warping() {
         None,
     );
     // flush the write cache so warping can calculate the accounts hash from storages
-    bank_forks
-        .read()
-        .unwrap()
-        .working_bank()
-        .force_flush_accounts_cache();
+    bank.force_flush_accounts_cache();
     let bank = bank_forks.write().unwrap().insert(Bank::warp_from_parent(
         &bank,
         &Pubkey::default(),
@@ -621,9 +621,11 @@ fn test_epoch_accounts_hash_and_warping() {
 
     // Ensure warping past the EAH start slot is OK
     info!("Warping past EAH start slot...");
-    let eah_start_offset = epoch_accounts_hash::calculation_offset_start(&bank);
+    let eah_start_offset = epoch_accounts_hash_utils::calculation_offset_start(&bank);
     let eah_start_slot_in_next_epoch =
         epoch_schedule.get_first_slot_in_epoch(bank.epoch() + 1) + eah_start_offset;
+    // flush the write cache so warping can calculate the accounts hash from storages
+    bank.force_flush_accounts_cache();
     let bank = bank_forks.write().unwrap().insert(Bank::warp_from_parent(
         &bank,
         &Pubkey::default(),
@@ -658,6 +660,7 @@ fn test_epoch_accounts_hash_and_warping() {
 // https://github.com/rust-lang/rust/pull/88582
 // https://github.com/jhpratt/rust/blob/727a4fc7e3f836938dfeb4a2ab237cfca612222d/library/core/src/num/uint_macros.rs#L1811-L1837
 const fn next_multiple_of(lhs: u64, rhs: u64) -> u64 {
+    #![allow(clippy::integer_arithmetic)]
     match lhs % rhs {
         0 => lhs,
         r => lhs + (rhs - r),

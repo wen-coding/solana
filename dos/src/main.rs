@@ -46,7 +46,7 @@ use {
     rand::{thread_rng, Rng},
     solana_bench_tps::{bench::generate_and_fund_keypairs, bench_tps_client::BenchTpsClient},
     solana_client::{connection_cache::ConnectionCache, tpu_connection::TpuConnection},
-    solana_core::serve_repair::{RepairProtocol, RepairRequestHeader, ServeRepair},
+    solana_core::repair::serve_repair::{RepairProtocol, RepairRequestHeader, ServeRepair},
     solana_dos::cli::*,
     solana_gossip::{
         contact_info::Protocol,
@@ -256,8 +256,13 @@ fn create_sender_thread(
 ) -> thread::JoinHandle<()> {
     // ConnectionCache is used instead of client because it gives ~6% higher pps
     let connection_cache = match tpu_use_quic {
-        true => ConnectionCache::new(DEFAULT_TPU_CONNECTION_POOL_SIZE),
-        false => ConnectionCache::with_udp(DEFAULT_TPU_CONNECTION_POOL_SIZE),
+        true => ConnectionCache::new_quic(
+            "connection_cache_dos_quic",
+            DEFAULT_TPU_CONNECTION_POOL_SIZE,
+        ),
+        false => {
+            ConnectionCache::with_udp("connection_cache_dos_udp", DEFAULT_TPU_CONNECTION_POOL_SIZE)
+        }
     };
     let connection = connection_cache.get_connection(target);
 
@@ -439,13 +444,14 @@ fn get_target(
                 target = match mode {
                     Mode::Gossip => Some((*node.pubkey(), node.gossip().unwrap())),
                     Mode::Tvu => Some((*node.pubkey(), node.tvu(Protocol::UDP).unwrap())),
-                    Mode::TvuForwards => Some((*node.pubkey(), node.tvu_forwards().unwrap())),
                     Mode::Tpu => Some((*node.pubkey(), node.tpu(protocol).unwrap())),
                     Mode::TpuForwards => {
                         Some((*node.pubkey(), node.tpu_forwards(protocol).unwrap()))
                     }
-                    Mode::Repair => Some((*node.pubkey(), node.repair().unwrap())),
-                    Mode::ServeRepair => Some((*node.pubkey(), node.serve_repair().unwrap())),
+                    Mode::Repair => todo!("repair socket is not gossiped anymore!"),
+                    Mode::ServeRepair => {
+                        Some((*node.pubkey(), node.serve_repair(Protocol::UDP).unwrap()))
+                    }
                     Mode::Rpc => None,
                 };
                 break;
@@ -770,8 +776,14 @@ fn main() {
         });
 
         let connection_cache = match cmd_params.tpu_use_quic {
-            true => ConnectionCache::new(DEFAULT_TPU_CONNECTION_POOL_SIZE),
-            false => ConnectionCache::with_udp(DEFAULT_TPU_CONNECTION_POOL_SIZE),
+            true => ConnectionCache::new_quic(
+                "connection_cache_dos_quic",
+                DEFAULT_TPU_CONNECTION_POOL_SIZE,
+            ),
+            false => ConnectionCache::with_udp(
+                "connection_cache_dos_udp",
+                DEFAULT_TPU_CONNECTION_POOL_SIZE,
+            ),
         };
         let (client, num_clients) = get_multi_client(
             &validators,
@@ -846,6 +858,9 @@ pub mod test {
             },
         );
 
+        // TODO: Figure out how to DOS repair. Repair socket is no longer
+        // gossiped and cannot be obtained from a node's contact-info.
+        #[cfg(not(test))]
         run_dos_no_client(
             &nodes,
             1,

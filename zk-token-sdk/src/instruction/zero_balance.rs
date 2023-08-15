@@ -54,7 +54,7 @@ impl ZeroBalanceProofData {
         keypair: &ElGamalKeypair,
         ciphertext: &ElGamalCiphertext,
     ) -> Result<Self, ProofError> {
-        let pod_pubkey = pod::ElGamalPubkey(keypair.public.to_bytes());
+        let pod_pubkey = pod::ElGamalPubkey(keypair.pubkey().to_bytes());
         let pod_ciphertext = pod::ElGamalCiphertext(ciphertext.to_bytes());
 
         let context = ZeroBalanceProofContext {
@@ -62,7 +62,7 @@ impl ZeroBalanceProofData {
             ciphertext: pod_ciphertext,
         };
 
-        let mut transcript = ZeroBalanceProof::transcript_new(&pod_pubkey, &pod_ciphertext);
+        let mut transcript = context.new_transcript();
         let proof = ZeroBalanceProof::new(keypair, ciphertext, &mut transcript).into();
 
         Ok(ZeroBalanceProofData { context, proof })
@@ -78,9 +78,7 @@ impl ZkProofData<ZeroBalanceProofContext> for ZeroBalanceProofData {
 
     #[cfg(not(target_os = "solana"))]
     fn verify_proof(&self) -> Result<(), ProofError> {
-        let mut transcript =
-            ZeroBalanceProof::transcript_new(&self.context.pubkey, &self.context.ciphertext);
-
+        let mut transcript = self.context.new_transcript();
         let pubkey = self.context.pubkey.try_into()?;
         let ciphertext = self.context.ciphertext.try_into()?;
         let proof: ZeroBalanceProof = self.proof.try_into()?;
@@ -92,15 +90,12 @@ impl ZkProofData<ZeroBalanceProofContext> for ZeroBalanceProofData {
 
 #[allow(non_snake_case)]
 #[cfg(not(target_os = "solana"))]
-impl ZeroBalanceProof {
-    fn transcript_new(
-        pubkey: &pod::ElGamalPubkey,
-        ciphertext: &pod::ElGamalCiphertext,
-    ) -> Transcript {
+impl ZeroBalanceProofContext {
+    fn new_transcript(&self) -> Transcript {
         let mut transcript = Transcript::new(b"ZeroBalanceProof");
 
-        transcript.append_pubkey(b"pubkey", pubkey);
-        transcript.append_ciphertext(b"ciphertext", ciphertext);
+        transcript.append_pubkey(b"pubkey", &self.pubkey);
+        transcript.append_ciphertext(b"ciphertext", &self.ciphertext);
 
         transcript
     }
@@ -115,12 +110,12 @@ mod test {
         let keypair = ElGamalKeypair::new_rand();
 
         // general case: encryption of 0
-        let ciphertext = keypair.public.encrypt(0_u64);
+        let ciphertext = keypair.pubkey().encrypt(0_u64);
         let zero_balance_proof_data = ZeroBalanceProofData::new(&keypair, &ciphertext).unwrap();
         assert!(zero_balance_proof_data.verify_proof().is_ok());
 
         // general case: encryption of > 0
-        let ciphertext = keypair.public.encrypt(1_u64);
+        let ciphertext = keypair.pubkey().encrypt(1_u64);
         let zero_balance_proof_data = ZeroBalanceProofData::new(&keypair, &ciphertext).unwrap();
         assert!(zero_balance_proof_data.verify_proof().is_err());
     }

@@ -733,14 +733,11 @@ impl<'b, T: Clone + Copy + 'static> Bucket<T> {
     pub fn insert(&mut self, key: &Pubkey, value: (&[T], RefCount)) {
         let (new, refct) = value;
         loop {
-            let rv = self.try_write(key, new.iter(), new.len(), refct);
-            match rv {
-                Ok(_) => return,
-                Err(err) => {
-                    self.grow(err);
-                    self.handle_delayed_grows();
-                }
-            }
+            let Err(err) = self.try_write(key, new.iter(), new.len(), refct) else {
+                return;
+            };
+            self.grow(err);
+            self.handle_delayed_grows();
         }
     }
 
@@ -906,7 +903,7 @@ mod tests {
                         .collect::<Vec<_>>();
                     let mut hashed = Bucket::index_entries(raw.clone().into_iter(), len, random);
                     let common_ix = 2; // both are put at same ix
-                    hashed.iter_mut().for_each(|mut v| {
+                    hashed.iter_mut().for_each(|v| {
                         v.0 = common_ix;
                     });
                     let hashed_raw = hashed.clone();

@@ -2,6 +2,7 @@ use {
     clap::{value_t, value_t_or_exit, values_t_or_exit, ArgMatches},
     crossbeam_channel::unbounded,
     log::*,
+    solana_accounts_db::hardened_unpack::open_genesis_config,
     solana_core::{
         accounts_hash_verifier::AccountsHashVerifier, validator::BlockVerificationMethod,
     },
@@ -18,24 +19,19 @@ use {
             self, BlockstoreProcessorError, ProcessOptions, TransactionStatusSender,
         },
     },
-    solana_measure::measure::Measure,
-    solana_rpc::{
-        transaction_notifier_interface::TransactionNotifierLock,
-        transaction_status_service::TransactionStatusService,
-    },
+    solana_measure::measure,
+    solana_rpc::transaction_status_service::TransactionStatusService,
     solana_runtime::{
         accounts_background_service::{
             AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService,
             PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
-        accounts_update_notifier_interface::AccountsUpdateNotifier,
         bank_forks::BankForks,
-        hardened_unpack::open_genesis_config,
         snapshot_config::SnapshotConfig,
         snapshot_hash::StartingSnapshotHashes,
         snapshot_utils::{
             self, clean_orphaned_account_snapshot_dirs, create_all_accounts_run_and_snapshot_dirs,
-            move_and_async_delete_path,
+            move_and_async_delete_path_contents,
         },
     },
     solana_sdk::{
@@ -67,7 +63,7 @@ pub fn get_shred_storage_type(ledger_path: &Path, message: &str) -> ShredStorage
     }
 }
 
-pub fn load_bank_forks(
+pub fn load_and_process_ledger(
     arg_matches: &ArgMatches,
     genesis_config: &GenesisConfig,
     blockstore: Arc<Blockstore>,
@@ -111,6 +107,8 @@ pub fn load_bank_forks(
         })
     };
 
+    let start_slot_msg = "The starting slot will be the latest snapshot slot, or genesis if \
+        the --no-snapshot flag is specified or if no snapshots are found.";
     match process_options.halt_at_slot {
         // Skip the following checks for sentinel values of Some(0) and None.
         // For Some(0), no slots will be be replayed after starting_slot.
@@ -119,15 +117,17 @@ pub fn load_bank_forks(
         Some(halt_slot) => {
             if halt_slot < starting_slot {
                 eprintln!(
-                "Unable to load bank forks at slot {halt_slot} because it is less than the starting slot {starting_slot}. \
-                The starting slot will be the latest snapshot slot, or genesis if --no-snapshot flag specified or no snapshots found."
-            );
+                    "Unable to process blockstore from starting slot {starting_slot} to \
+                    {halt_slot}; the ending slot is less than the starting slot. {start_slot_msg}"
+                );
                 exit(1);
             }
             // Check if we have the slot data necessary to replay from starting_slot to >= halt_slot.
             if !blockstore.slot_range_connected(starting_slot, halt_slot) {
                 eprintln!(
-                    "Unable to load bank forks at slot {halt_slot} due to disconnected blocks.",
+                    "Unable to process blockstore from starting slot {starting_slot} to \
+                    {halt_slot}; the blockstore does not contain a replayable chain between these \
+                    slots. {start_slot_msg}"
                 );
                 exit(1);
             }
@@ -175,39 +175,36 @@ pub fn load_bank_forks(
 
     let (account_run_paths, account_snapshot_paths) =
         create_all_accounts_run_and_snapshot_dirs(&account_paths).unwrap_or_else(|err| {
-            eprintln!("Error: {err:?}");
+            eprintln!("Error: {err}");
             exit(1);
         });
 
     // From now on, use run/ paths in the same way as the previous account_paths.
     let account_paths = account_run_paths;
 
-    info!("Cleaning contents of account paths: {:?}", account_paths);
-    let mut measure = Measure::start("clean_accounts_paths");
-    account_paths.iter().for_each(|path| {
-        if path.exists() {
-            move_and_async_delete_path(path);
-        }
-    });
-    measure.stop();
-    info!("done. {}", measure);
+    let (_, measure_clean_account_paths) = measure!(
+        account_paths.iter().for_each(|path| {
+            if path.exists() {
+                info!("Cleaning contents of account path: {}", path.display());
+                move_and_async_delete_path_contents(path);
+            }
+        }),
+        "Cleaning account paths"
+    );
+    info!("{measure_clean_account_paths}");
 
     snapshot_utils::purge_incomplete_bank_snapshots(&bank_snapshots_dir);
 
-    info!(
-        "Cleaning contents of account snapshot paths: {:?}",
-        account_snapshot_paths
-    );
-    if let Err(e) =
+    info!("Cleaning contents of account snapshot paths: {account_snapshot_paths:?}");
+    if let Err(err) =
         clean_orphaned_account_snapshot_dirs(&bank_snapshots_dir, &account_snapshot_paths)
     {
-        eprintln!("Failed to clean orphaned account snapshot dirs.  Error: {e:?}");
+        eprintln!("Failed to clean orphaned account snapshot dirs: {err}");
         exit(1);
     }
 
-    let mut accounts_update_notifier = Option::<AccountsUpdateNotifier>::default();
-    let mut transaction_notifier = Option::<TransactionNotifierLock>::default();
-    if arg_matches.is_present("geyser_plugin_config") {
+    let geyser_plugin_active = arg_matches.is_present("geyser_plugin_config");
+    let (accounts_update_notifier, transaction_notifier) = if geyser_plugin_active {
         let geyser_config_files = values_t_or_exit!(arg_matches, "geyser_plugin_config", String)
             .into_iter()
             .map(PathBuf::from)
@@ -218,14 +215,19 @@ pub fn load_bank_forks(
         let geyser_service =
             GeyserPluginService::new(confirmed_bank_receiver, &geyser_config_files).unwrap_or_else(
                 |err| {
-                    eprintln!("Failed to setup Geyser service: {err:?}");
+                    eprintln!("Failed to setup Geyser service: {err}");
                     exit(1);
                 },
             );
-        accounts_update_notifier = geyser_service.get_accounts_update_notifier();
-        transaction_notifier = geyser_service.get_transaction_notifier();
-    }
+        (
+            geyser_service.get_accounts_update_notifier(),
+            geyser_service.get_transaction_notifier(),
+        )
+    } else {
+        (None, None)
+    };
 
+    let exit = Arc::new(AtomicBool::new(false));
     let (bank_forks, leader_schedule_cache, starting_snapshot_hashes, ..) =
         bank_forks_utils::load_bank_forks(
             genesis_config,
@@ -237,7 +239,7 @@ pub fn load_bank_forks(
             None,
             None, // Maybe support this later, though
             accounts_update_notifier,
-            &Arc::default(),
+            exit.clone(),
         );
     let block_verification_method = value_t!(
         arg_matches,
@@ -250,7 +252,6 @@ pub fn load_bank_forks(
         block_verification_method,
     );
 
-    let exit = Arc::new(AtomicBool::new(false));
     let node_id = Arc::new(Keypair::new());
     let cluster_info = Arc::new(ClusterInfo::new(
         ContactInfo::new_localhost(&node_id.pubkey(), timestamp()),
@@ -292,27 +293,42 @@ pub fn load_bank_forks(
         None,
     );
 
-    let (transaction_status_sender, transaction_status_service) = if transaction_notifier.is_some()
-    {
-        let (transaction_status_sender, transaction_status_receiver) = unbounded();
-        let transaction_status_service = TransactionStatusService::new(
-            transaction_status_receiver,
-            Arc::default(),
-            false,
-            transaction_notifier,
-            blockstore.clone(),
-            false,
-            &exit,
-        );
-        (
-            Some(TransactionStatusSender {
-                sender: transaction_status_sender,
-            }),
-            Some(transaction_status_service),
-        )
-    } else {
-        (None, None)
-    };
+    let enable_rpc_transaction_history = arg_matches.is_present("enable_rpc_transaction_history");
+
+    let (transaction_status_sender, transaction_status_service) =
+        if geyser_plugin_active || enable_rpc_transaction_history {
+            // Need Primary (R/W) access to insert transaction data
+            let tss_blockstore = if enable_rpc_transaction_history {
+                Arc::new(open_blockstore(
+                    blockstore.ledger_path(),
+                    AccessType::PrimaryForMaintenance,
+                    None,
+                    false,
+                    false,
+                ))
+            } else {
+                blockstore.clone()
+            };
+
+            let (transaction_status_sender, transaction_status_receiver) = unbounded();
+            let transaction_status_service = TransactionStatusService::new(
+                transaction_status_receiver,
+                Arc::default(),
+                enable_rpc_transaction_history,
+                transaction_notifier,
+                tss_blockstore,
+                false,
+                exit.clone(),
+            );
+            (
+                Some(TransactionStatusSender {
+                    sender: transaction_status_sender,
+                }),
+                Some(transaction_status_service),
+            )
+        } else {
+            (None, None)
+        };
 
     let result = blockstore_processor::process_blockstore_from_root(
         blockstore.as_ref(),
@@ -341,11 +357,12 @@ pub fn open_blockstore(
     access_type: AccessType,
     wal_recovery_mode: Option<BlockstoreRecoveryMode>,
     force_update_to_open: bool,
+    enforce_ulimit_nofile: bool,
 ) -> Blockstore {
     let shred_storage_type = get_shred_storage_type(
         ledger_path,
         &format!(
-            "Shred stroage type cannot be inferred for ledger at {ledger_path:?}, \
+            "Shred storage type cannot be inferred for ledger at {ledger_path:?}, \
          using default RocksLevel",
         ),
     );
@@ -355,7 +372,7 @@ pub fn open_blockstore(
         BlockstoreOptions {
             access_type: access_type.clone(),
             recovery_mode: wal_recovery_mode.clone(),
-            enforce_ulimit_nofile: true,
+            enforce_ulimit_nofile,
             column_options: LedgerColumnOptions {
                 shred_storage_type,
                 ..LedgerColumnOptions::default()
@@ -363,20 +380,36 @@ pub fn open_blockstore(
         },
     ) {
         Ok(blockstore) => blockstore,
-        Err(BlockstoreError::RocksDb(err))
-            if (err
+        Err(BlockstoreError::RocksDb(err)) => {
+            // Missing essential file, indicative of blockstore not existing
+            let missing_blockstore = err
                 .to_string()
-                // Missing column family
-                .starts_with("Invalid argument: Column family not found:")
-                || err
-                    .to_string()
-                    // Missing essential file, indicative of blockstore not existing
-                    .starts_with("IO error: No such file or directory:"))
-                && access_type == AccessType::Secondary =>
-        {
-            error!("Blockstore is incompatible with current software and requires updates");
+                .starts_with("IO error: No such file or directory:");
+            // Missing column in blockstore that is expected by software
+            let missing_column = err
+                .to_string()
+                .starts_with("Invalid argument: Column family not found:");
+            // The blockstore settings with Primary access can resolve the
+            // above issues automatically, so only emit the help messages
+            // if access type is Secondary
+            let is_secondary = access_type == AccessType::Secondary;
+
+            if missing_blockstore && is_secondary {
+                eprintln!(
+                    "Failed to open blockstore at {ledger_path:?}, it \
+                    is missing at least one critical file: {err:?}"
+                );
+            } else if missing_column && is_secondary {
+                eprintln!(
+                    "Failed to open blockstore at {ledger_path:?}, it \
+                    does not have all necessary columns: {err:?}"
+                );
+            } else {
+                eprintln!("Failed to open blockstore at {ledger_path:?}: {err:?}");
+                exit(1);
+            }
             if !force_update_to_open {
-                error!("Use --force-update-to-open to allow blockstore to update");
+                eprintln!("Use --force-update-to-open flag to attempt to update the blockstore");
                 exit(1);
             }
             open_blockstore_with_temporary_primary_access(
@@ -385,7 +418,7 @@ pub fn open_blockstore(
                 wal_recovery_mode,
             )
             .unwrap_or_else(|err| {
-                error!(
+                eprintln!(
                     "Failed to open blockstore (with --force-update-to-open) at {:?}: {:?}",
                     ledger_path, err
                 );

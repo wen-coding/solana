@@ -1,19 +1,18 @@
 //! Used to create minimal snapshots - separated here to keep accounts_db simpler
 
 use {
-    crate::{
-        accounts_db::{
-            AccountStorageEntry, AccountsDb, GetUniqueAccountsResult, PurgeStats, StoreReclaims,
-        },
-        accounts_partition,
-        bank::Bank,
-        static_ids,
-    },
+    crate::{bank::Bank, builtins::BUILTINS, static_ids},
     dashmap::DashSet,
     log::info,
     rayon::{
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
         prelude::ParallelSlice,
+    },
+    solana_accounts_db::{
+        accounts_db::{
+            AccountStorageEntry, AccountsDb, GetUniqueAccountsResult, PurgeStats, StoreReclaims,
+        },
+        accounts_partition,
     },
     solana_measure::measure,
     solana_sdk::{
@@ -114,13 +113,9 @@ impl<'a> SnapshotMinimizer<'a> {
 
     /// Used to get builtin accounts in `minimize`
     fn get_builtins(&self) {
-        self.bank
-            .get_builtin_programs()
-            .vec
-            .iter()
-            .for_each(|(pubkey, _builtin)| {
-                self.minimized_account_set.insert(*pubkey);
-            });
+        BUILTINS.iter().for_each(|e| {
+            self.minimized_account_set.insert(e.program_id);
+        });
     }
 
     /// Used to get static runtime accounts in `minimize`
@@ -376,7 +371,7 @@ impl<'a> SnapshotMinimizer<'a> {
                 (
                     slot,
                     &accounts[..],
-                    crate::accounts_db::INCLUDE_SLOT_IN_HASH_IRRELEVANT_APPEND_VEC_OPERATION,
+                    solana_accounts_db::accounts_db::INCLUDE_SLOT_IN_HASH_IRRELEVANT_APPEND_VEC_OPERATION,
                 ),
                 Some(hashes),
                 new_storage,

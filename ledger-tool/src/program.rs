@@ -1,12 +1,12 @@
 use {
-    crate::{args::*, ledger_utils::*},
+    crate::{args::*, canonicalize_ledger_path, ledger_utils::*},
     clap::{value_t, App, AppSettings, Arg, ArgMatches, SubCommand},
     log::*,
     serde::{Deserialize, Serialize},
     serde_json::Result,
     solana_bpf_loader_program::{
         create_vm, load_program_from_bytes, serialization::serialize_parameters,
-        syscalls::create_loader,
+        syscalls::create_program_runtime_environment_v1,
     },
     solana_clap_utils::input_parsers::pubkeys_of,
     solana_ledger::{
@@ -15,9 +15,7 @@ use {
     },
     solana_program_runtime::{
         invoke_context::InvokeContext,
-        loaded_programs::{
-            LoadProgramMetrics, LoadedProgram, LoadedProgramType, DELAY_VISIBILITY_SLOT_OFFSET,
-        },
+        loaded_programs::{LoadProgramMetrics, LoadedProgramType, DELAY_VISIBILITY_SLOT_OFFSET},
         with_mock_invoke_context,
     },
     solana_rbpf::{
@@ -79,6 +77,7 @@ fn load_blockstore(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -> Arc<Bank
     let debug_keys = pubkeys_of(arg_matches, "debug_key")
         .map(|pubkeys| Arc::new(pubkeys.into_iter().collect::<HashSet<_>>()));
     let force_update_to_open = arg_matches.is_present("force_update_to_open");
+    let enforce_ulimit_nofile = !arg_matches.is_present("ignore_ulimit_nofile_error");
     let process_options = ProcessOptions {
         new_hard_forks: hardforks_of(arg_matches, "hard_forks"),
         run_verification: false,
@@ -118,8 +117,9 @@ fn load_blockstore(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -> Arc<Bank
         AccessType::Secondary,
         wal_recovery_mode,
         force_update_to_open,
+        enforce_ulimit_nofile,
     );
-    let (bank_forks, ..) = load_bank_forks(
+    let (bank_forks, ..) = load_and_process_ledger(
         arg_matches,
         &genesis_config,
         Arc::new(blockstore),
@@ -162,13 +162,11 @@ impl ProgramSubCommand for App<'_, '_> {
         .subcommand(
             SubCommand::with_name("cfg")
                 .about("generates Control Flow Graph of the program.")
-                .arg(&max_genesis_arg)
                 .arg(&program_arg)
         )
         .subcommand(
             SubCommand::with_name("disassemble")
                 .about("dumps disassembled code of the program.")
-                .arg(&max_genesis_arg)
                 .arg(&program_arg)
         )
         .subcommand(
@@ -341,8 +339,6 @@ fn load_program<'a>(
     let mut contents = Vec::new();
     file.read_to_end(&mut contents).unwrap();
     let slot = Slot::default();
-    let reject_deployment_of_broken_elfs = false;
-    let debugging_features = true;
     let log_collector = invoke_context.get_log_collector();
     let loader_key = bpf_loader_upgradeable::id();
     let mut load_program_metrics = LoadProgramMetrics {
@@ -350,46 +346,51 @@ fn load_program<'a>(
         ..LoadProgramMetrics::default()
     };
     let account_size = contents.len();
+    let program_runtime_environment = create_program_runtime_environment_v1(
+        &invoke_context.feature_set,
+        invoke_context.get_compute_budget(),
+        false, /* deployment */
+        true,  /* debugging_features */
+    )
+    .unwrap();
     // Allowing mut here, since it may be needed for jit compile, which is under a config flag
     #[allow(unused_mut)]
     let mut verified_executable = if is_elf {
         let result = load_program_from_bytes(
             &invoke_context.feature_set,
-            invoke_context.get_compute_budget(),
             log_collector,
             &mut load_program_metrics,
             &contents,
             &loader_key,
             account_size,
             slot,
-            reject_deployment_of_broken_elfs,
-            debugging_features,
+            Arc::new(program_runtime_environment),
         );
         match result {
             Ok(loaded_program) => match loaded_program.program {
-                LoadedProgramType::LegacyV1(program) => Ok(unsafe { std::mem::transmute(program) }),
+                LoadedProgramType::LegacyV1(program) => Ok(program),
                 _ => unreachable!(),
             },
             Err(err) => Err(format!("Loading executable failed: {err:?}")),
         }
     } else {
-        let loader = create_loader(
-            &invoke_context.feature_set,
-            invoke_context.get_compute_budget(),
-            true,
-            true,
+        let executable = assemble::<InvokeContext>(
+            std::str::from_utf8(contents.as_slice()).unwrap(),
+            Arc::new(program_runtime_environment),
         )
         .unwrap();
-        let executable =
-            assemble::<InvokeContext>(std::str::from_utf8(contents.as_slice()).unwrap(), loader)
-                .unwrap();
         Executable::<RequisiteVerifier, InvokeContext>::verified(executable)
             .map_err(|err| format!("Assembling executable failed: {err:?}"))
     }
     .unwrap();
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
     verified_executable.jit_compile().unwrap();
-    verified_executable
+    unsafe {
+        std::mem::transmute::<
+            Executable<RequisiteVerifier, InvokeContext<'static>>,
+            Executable<RequisiteVerifier, InvokeContext<'a>>,
+        >(verified_executable)
+    }
 }
 
 enum Action {
@@ -432,7 +433,8 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
         ("run", Some(arg_matches)) => arg_matches,
         _ => unreachable!(),
     };
-    let bank = load_blockstore(ledger_path, matches);
+    let ledger_path = canonicalize_ledger_path(ledger_path);
+    let bank = load_blockstore(&ledger_path, matches);
     let loader_id = bpf_loader_upgradeable::id();
     let mut transaction_accounts = Vec::new();
     let mut instruction_accounts = Vec::new();
@@ -531,27 +533,14 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
         AccountSharedData::new(0, 0, &loader_id),
     ));
     let interpreted = matches.value_of("mode").unwrap() != "jit";
-    with_mock_invoke_context!(
-        invoke_context,
-        transaction_context,
-        transaction_accounts,
-        bank.get_builtin_programs()
-    );
+    with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
 
     // Adding `DELAY_VISIBILITY_SLOT_OFFSET` to slots to accommodate for delay visibility of the program
     let mut loaded_programs =
         LoadedProgramsForTxBatch::new(bank.slot() + DELAY_VISIBILITY_SLOT_OFFSET);
     for key in cached_account_keys {
-        let program = bank.load_program(&key, true).unwrap_or_else(|err| {
-            // Create a tombstone for the program in the cache
-            debug!("Failed to load program {}, error {:?}", key, err);
-            Arc::new(LoadedProgram::new_tombstone(
-                0,
-                LoadedProgramType::FailedVerification,
-            ))
-        });
+        loaded_programs.replenish(key, bank.load_program(&key));
         debug!("Loaded program {}", key);
-        loaded_programs.replenish(key, program);
     }
     invoke_context.programs_loaded_for_tx_batch = &loaded_programs;
 
@@ -591,17 +580,17 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
     if matches.value_of("mode").unwrap() == "debugger" {
         vm.debug_port = Some(matches.value_of("port").unwrap().parse::<u16>().unwrap());
     }
-    let (instruction_count, result) = vm.execute_program(interpreted);
+    let (instruction_count, result) = vm.execute_program(&verified_executable, interpreted);
     let duration = Instant::now() - start_time;
     if matches.occurrences_of("trace") > 0 {
         // top level trace is stored in syscall_context
-        if let Some(Some(syscall_context)) = vm.env.context_object_pointer.syscall_context.last() {
+        if let Some(Some(syscall_context)) = vm.context_object_pointer.syscall_context.last() {
             let trace = syscall_context.trace_log.as_slice();
             output_trace(matches, trace, 0, &mut analysis);
         }
         // the remaining traces are saved in InvokeContext when
         // corresponding syscall_contexts are popped
-        let traces = vm.env.context_object_pointer.get_traces();
+        let traces = vm.context_object_pointer.get_traces();
         for (frame, trace) in traces.iter().filter(|t| !t.is_empty()).enumerate() {
             output_trace(matches, trace, frame + 1, &mut analysis);
         }

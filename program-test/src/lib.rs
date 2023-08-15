@@ -8,21 +8,19 @@ use {
     base64::{prelude::BASE64_STANDARD, Engine},
     chrono_humanize::{Accuracy, HumanTime, Tense},
     log::*,
+    solana_accounts_db::epoch_accounts_hash::EpochAccountsHash,
     solana_banks_client::start_client,
     solana_banks_server::banks_server::start_local_server,
     solana_bpf_loader_program::serialization::serialize_parameters,
     solana_program_runtime::{
-        builtin_program::{create_builtin, BuiltinPrograms, ProcessInstructionWithContext},
-        compute_budget::ComputeBudget,
-        ic_msg, stable_log,
-        timings::ExecuteTimings,
+        compute_budget::ComputeBudget, ic_msg, invoke_context::ProcessInstructionWithContext,
+        loaded_programs::LoadedProgram, stable_log, timings::ExecuteTimings,
     },
     solana_runtime::{
         accounts_background_service::{AbsRequestSender, SnapshotRequestType},
         bank::Bank,
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
-        epoch_accounts_hash::EpochAccountsHash,
         genesis_utils::{create_genesis_config_with_leader_ex, GenesisConfigInfo},
         runtime_config::RuntimeConfig,
     },
@@ -336,8 +334,8 @@ impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
             let new_data = borrowed_account.get_data();
             let new_len = new_data.len();
 
-            // Resize account_info data (grow-only)
-            if account_info.data_len() < new_len {
+            // Resize account_info data
+            if account_info.data_len() != new_len {
                 account_info.realloc(new_len, false)?;
             }
 
@@ -364,6 +362,13 @@ impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
         )
     }
 
+    fn sol_get_epoch_rewards_sysvar(&self, var_addr: *mut u8) -> u64 {
+        get_sysvar(
+            get_invoke_context().get_sysvar_cache().get_epoch_rewards(),
+            var_addr,
+        )
+    }
+
     #[allow(deprecated)]
     fn sol_get_fees_sysvar(&self, var_addr: *mut u8) -> u64 {
         get_sysvar(get_invoke_context().get_sysvar_cache().get_fees(), var_addr)
@@ -371,6 +376,15 @@ impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
 
     fn sol_get_rent_sysvar(&self, var_addr: *mut u8) -> u64 {
         get_sysvar(get_invoke_context().get_sysvar_cache().get_rent(), var_addr)
+    }
+
+    fn sol_get_last_restart_slot(&self, var_addr: *mut u8) -> u64 {
+        get_sysvar(
+            get_invoke_context()
+                .get_sysvar_cache()
+                .get_last_restart_slot(),
+            var_addr,
+        )
     }
 
     fn sol_get_return_data(&self) -> Option<(Pubkey, Vec<u8>)> {
@@ -436,7 +450,7 @@ pub fn read_file<P: AsRef<Path>>(path: P) -> Vec<u8> {
 
 pub struct ProgramTest {
     accounts: Vec<(Pubkey, AccountSharedData)>,
-    builtin_programs: BuiltinPrograms,
+    builtin_programs: Vec<(Pubkey, String, LoadedProgram)>,
     compute_max_units: Option<u64>,
     prefer_bpf: bool,
     deactivate_feature_set: HashSet<Pubkey>,
@@ -473,7 +487,7 @@ impl Default for ProgramTest {
 
         Self {
             accounts: vec![],
-            builtin_programs: BuiltinPrograms::default(),
+            builtin_programs: vec![],
             compute_max_units: None,
             prefer_bpf,
             deactivate_feature_set,
@@ -507,6 +521,10 @@ impl ProgramTest {
 
     /// Override the default maximum compute units
     pub fn set_compute_max_units(&mut self, compute_max_units: u64) {
+        debug_assert!(
+            compute_max_units <= i64::MAX as u64,
+            "Compute unit limit must fit in `i64::MAX`"
+        );
         self.compute_max_units = Some(compute_max_units);
     }
 
@@ -519,7 +537,7 @@ impl ProgramTest {
     #[allow(deprecated)]
     #[deprecated(since = "1.8.0", note = "please use `set_compute_max_units` instead")]
     pub fn set_bpf_compute_max_units(&mut self, bpf_compute_max_units: u64) {
-        self.compute_max_units = Some(bpf_compute_max_units);
+        self.set_compute_max_units(bpf_compute_max_units);
     }
 
     /// Add an account to the test environment
@@ -694,9 +712,10 @@ impl ProgramTest {
         process_instruction: ProcessInstructionWithContext,
     ) {
         info!("\"{}\" builtin program", program_name);
-        self.builtin_programs.vec.push((
+        self.builtin_programs.push((
             program_id,
-            create_builtin(program_name.to_string(), process_instruction),
+            program_name.to_string(),
+            LoadedProgram::new_builtin(0, program_name.len(), process_instruction),
         ));
     }
 
@@ -708,7 +727,7 @@ impl ProgramTest {
     }
 
     fn setup_bank(
-        &self,
+        &mut self,
     ) -> (
         Arc<RwLock<BankForks>>,
         Arc<RwLock<BlockCommitmentCache>>,
@@ -792,8 +811,10 @@ impl ProgramTest {
         }
 
         // User-supplied additional builtins
-        for (program_id, builtin) in self.builtin_programs.vec.iter() {
-            bank.add_builtin(*program_id, builtin.clone());
+        let mut builtin_programs = Vec::new();
+        std::mem::swap(&mut self.builtin_programs, &mut builtin_programs);
+        for (program_id, name, builtin) in builtin_programs.into_iter() {
+            bank.add_builtin(program_id, name, builtin);
         }
 
         for (address, account) in self.accounts.iter() {
@@ -831,7 +852,7 @@ impl ProgramTest {
         )
     }
 
-    pub async fn start(self) -> (BanksClient, Keypair, Hash) {
+    pub async fn start(mut self) -> (BanksClient, Keypair, Hash) {
         let (bank_forks, block_commitment_cache, last_blockhash, gci) = self.setup_bank();
         let target_tick_duration = gci.genesis_config.poh_config.target_tick_duration;
         let target_slot_duration = target_tick_duration * gci.genesis_config.ticks_per_slot as u32;
@@ -866,7 +887,7 @@ impl ProgramTest {
     ///
     /// Returns a `BanksClient` interface into the test environment as well as a payer `Keypair`
     /// with SOL for sending transactions
-    pub async fn start_with_context(self) -> ProgramTestContext {
+    pub async fn start_with_context(mut self) -> ProgramTestContext {
         let (bank_forks, block_commitment_cache, last_blockhash, gci) = self.setup_bank();
         let target_tick_duration = gci.genesis_config.poh_config.target_tick_duration;
         let transport = start_local_server(
@@ -1101,7 +1122,7 @@ impl ProgramTestContext {
                 &Pubkey::default(),
                 pre_warp_slot,
                 // some warping tests cannot use the append vecs because of the sequence of adding roots and flushing
-                solana_runtime::accounts_db::CalcAccountsHashDataSource::IndexForTests,
+                solana_accounts_db::accounts_db::CalcAccountsHashDataSource::IndexForTests,
             ))
         };
 
@@ -1152,6 +1173,43 @@ impl ProgramTestContext {
         Ok(())
     }
 
+    /// warp forward one more slot and force reward interval end
+    pub fn warp_forward_force_reward_interval_end(&mut self) -> Result<(), ProgramTestError> {
+        let mut bank_forks = self.bank_forks.write().unwrap();
+        let bank = bank_forks.working_bank();
+
+        // Fill ticks until a new blockhash is recorded, otherwise retried transactions will have
+        // the same signature
+        bank.fill_bank_with_ticks_for_tests();
+        let pre_warp_slot = bank.slot();
+
+        bank_forks.set_root(
+            pre_warp_slot,
+            &solana_runtime::accounts_background_service::AbsRequestSender::default(),
+            Some(pre_warp_slot),
+        );
+
+        // warp_bank is frozen so go forward to get unfrozen bank at warp_slot
+        let warp_slot = pre_warp_slot + 1;
+        let mut warp_bank = Bank::new_from_parent(&bank, &Pubkey::default(), warp_slot);
+
+        warp_bank.force_reward_interval_end_for_tests();
+        bank_forks.insert(warp_bank);
+
+        // Update block commitment cache, otherwise banks server will poll at
+        // the wrong slot
+        let mut w_block_commitment_cache = self.block_commitment_cache.write().unwrap();
+        // HACK: The root set here should be `pre_warp_slot`, but since we're
+        // in a testing environment, the root bank never updates after a warp.
+        // The ticking thread only updates the working bank, and never the root
+        // bank.
+        w_block_commitment_cache.set_all_slots(warp_slot, warp_slot);
+
+        let bank = bank_forks.working_bank();
+        self.last_blockhash = bank.last_blockhash();
+        Ok(())
+    }
+
     /// Get a new latest blockhash, similar in spirit to RpcClient::get_latest_blockhash()
     pub async fn get_new_latest_blockhash(&mut self) -> io::Result<Hash> {
         let blockhash = self
@@ -1160,5 +1218,14 @@ impl ProgramTestContext {
             .await?;
         self.last_blockhash = blockhash;
         Ok(blockhash)
+    }
+
+    /// record a hard fork slot in working bank; should be in the past
+    pub fn register_hard_fork(&mut self, hard_fork_slot: Slot) {
+        self.bank_forks
+            .read()
+            .unwrap()
+            .working_bank()
+            .register_hard_fork(hard_fork_slot)
     }
 }

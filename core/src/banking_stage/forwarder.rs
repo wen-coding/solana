@@ -1,11 +1,13 @@
 use {
-    super::{BankingStageStats, ForwardOption},
-    crate::{
+    super::{
         forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
-        leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
+        leader_slot_metrics::LeaderSlotMetricsTracker,
+        unprocessed_transaction_storage::UnprocessedTransactionStorage, BankingStageStats,
+        ForwardOption,
+    },
+    crate::{
         next_leader::{next_leader, next_leader_tpu_vote},
         tracer_packet_stats::TracerPacketStats,
-        unprocessed_transaction_storage::UnprocessedTransactionStorage,
     },
     solana_client::{connection_cache::ConnectionCache, tpu_connection::TpuConnection},
     solana_gossip::cluster_info::ClusterInfo,
@@ -142,7 +144,7 @@ impl Forwarder {
     /// Forwards all valid, unprocessed packets in the iterator, up to a rate limit.
     /// Returns whether forwarding succeeded, the number of attempted forwarded packets
     /// if any, the time spent forwarding in us, and the leader pubkey if any.
-    fn forward_packets<'a>(
+    pub(crate) fn forward_packets<'a>(
         &self,
         forward_option: &ForwardOption,
         forwardable_packets: impl Iterator<Item = &'a Packet>,
@@ -269,8 +271,8 @@ impl Forwarder {
 mod tests {
     use {
         super::*,
-        crate::{
-            banking_stage::tests::{create_slow_genesis_config_with_leader, new_test_cluster_info},
+        crate::banking_stage::{
+            tests::{create_slow_genesis_config_with_leader, new_test_cluster_info},
             unprocessed_packet_batches::{DeserializedPacket, UnprocessedPacketBatches},
             unprocessed_transaction_storage::ThreadType,
         },
@@ -370,7 +372,7 @@ mod tests {
                 poh_recorder.clone(),
                 bank_forks.clone(),
                 cluster_info.clone(),
-                Arc::new(ConnectionCache::default()),
+                Arc::new(ConnectionCache::new("connection_cache_test")),
                 Arc::new(data_budget),
             );
             let unprocessed_packet_batches: UnprocessedPacketBatches =
@@ -445,7 +447,7 @@ mod tests {
             ),
             ThreadType::Transactions,
         );
-        let connection_cache = ConnectionCache::default();
+        let connection_cache = ConnectionCache::new("connection_cache_test");
 
         let test_cases = vec![
             ("fwd-normal", true, vec![normal_block_hash], 2),

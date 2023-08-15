@@ -7,7 +7,7 @@ use {
         },
         errors::ProofError,
         range_proof::RangeProof,
-        sigma_proofs::ctxt_comm_equality_proof::CiphertextCommitmentEqualityProof,
+        sigma_proofs::ciphertext_commitment_equality_proof::CiphertextCommitmentEqualityProof,
         transcript::TranscriptProtocol,
     },
     merlin::Transcript,
@@ -69,7 +69,7 @@ impl WithdrawData {
         // current source balance
         let final_ciphertext = current_ciphertext - &ElGamal::encode(amount);
 
-        let pod_pubkey = pod::ElGamalPubkey(keypair.public.to_bytes());
+        let pod_pubkey = pod::ElGamalPubkey(keypair.pubkey().to_bytes());
         let pod_final_ciphertext: pod::ElGamalCiphertext = final_ciphertext.into();
 
         let context = WithdrawProofContext {
@@ -77,7 +77,7 @@ impl WithdrawData {
             final_ciphertext: pod_final_ciphertext,
         };
 
-        let mut transcript = WithdrawProof::transcript_new(&pod_pubkey, &pod_final_ciphertext);
+        let mut transcript = context.new_transcript();
         let proof = WithdrawProof::new(keypair, final_balance, &final_ciphertext, &mut transcript);
 
         Ok(Self { context, proof })
@@ -93,13 +93,25 @@ impl ZkProofData<WithdrawProofContext> for WithdrawData {
 
     #[cfg(not(target_os = "solana"))]
     fn verify_proof(&self) -> Result<(), ProofError> {
-        let mut transcript =
-            WithdrawProof::transcript_new(&self.context.pubkey, &self.context.final_ciphertext);
+        let mut transcript = self.context.new_transcript();
 
         let elgamal_pubkey = self.context.pubkey.try_into()?;
         let final_balance_ciphertext = self.context.final_ciphertext.try_into()?;
         self.proof
             .verify(&elgamal_pubkey, &final_balance_ciphertext, &mut transcript)
+    }
+}
+
+#[allow(non_snake_case)]
+#[cfg(not(target_os = "solana"))]
+impl WithdrawProofContext {
+    fn new_transcript(&self) -> Transcript {
+        let mut transcript = Transcript::new(b"WithdrawProof");
+
+        transcript.append_pubkey(b"pubkey", &self.pubkey);
+        transcript.append_ciphertext(b"ciphertext", &self.final_ciphertext);
+
+        transcript
     }
 }
 
@@ -117,24 +129,12 @@ pub struct WithdrawProof {
     pub equality_proof: pod::CiphertextCommitmentEqualityProof,
 
     /// Associated range proof
-    pub range_proof: pod::RangeProof64, // 672 bytes
+    pub range_proof: pod::RangeProofU64, // 672 bytes
 }
 
 #[allow(non_snake_case)]
 #[cfg(not(target_os = "solana"))]
 impl WithdrawProof {
-    fn transcript_new(
-        pubkey: &pod::ElGamalPubkey,
-        ciphertext: &pod::ElGamalCiphertext,
-    ) -> Transcript {
-        let mut transcript = Transcript::new(b"WithdrawProof");
-
-        transcript.append_pubkey(b"pubkey", pubkey);
-        transcript.append_ciphertext(b"ciphertext", ciphertext);
-
-        transcript
-    }
-
     pub fn new(
         keypair: &ElGamalKeypair,
         final_balance: u64,
@@ -202,7 +202,7 @@ mod test {
         let keypair = ElGamalKeypair::new_rand();
 
         let current_balance: u64 = 77;
-        let current_ciphertext = keypair.public.encrypt(current_balance);
+        let current_ciphertext = keypair.pubkey().encrypt(current_balance);
 
         let withdraw_amount: u64 = 55;
 

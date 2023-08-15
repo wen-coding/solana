@@ -615,7 +615,7 @@ mod tests {
             ..
         } = create_genesis_config(10_000);
         let exit = Arc::new(AtomicBool::new(false));
-        let validator_exit = create_validator_exit(&exit);
+        let validator_exit = create_validator_exit(exit.clone());
         let bank = Bank::new_for_tests(&genesis_config);
         let cluster_info = Arc::new(new_test_cluster_info());
         let ip_addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -629,7 +629,7 @@ mod tests {
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::default()));
         let optimistically_confirmed_bank =
             OptimisticallyConfirmedBank::locked_from_bank_forks_root(&bank_forks);
-        let connection_cache = Arc::new(ConnectionCache::default());
+        let connection_cache = Arc::new(ConnectionCache::new("connection_cache_test"));
         let mut rpc_service = JsonRpcService::new(
             rpc_addr,
             JsonRpcConfig::default(),

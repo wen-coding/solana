@@ -142,8 +142,12 @@ mkdir -p "$installDir/bin"
 
   # Exclude `spl-token` binary for net.sh builds
   if [[ -z "$validatorOnly" ]]; then
+    # the patch-related configs are needed for rust 1.69+ on Windows; see Cargo.toml
     # shellcheck disable=SC2086 # Don't want to double quote $rust_version
-    "$cargo" $maybeRustVersion install --locked spl-token-cli --root "$installDir"
+    "$cargo" $maybeRustVersion \
+      --config 'patch.crates-io.ntapi.git="https://github.com/solana-labs/ntapi"' \
+      --config 'patch.crates-io.ntapi.rev="97ede981a1777883ff86d142b75024b023f04fad"' \
+      install --locked spl-token-cli --root "$installDir"
   fi
 )
 
@@ -167,7 +171,7 @@ fi
 # Add Solidity Compiler
 if [[ -z "$validatorOnly" ]]; then
   base="https://github.com/hyperledger/solang/releases/download"
-  version="v0.2.3"
+  version="v0.3.1"
   curlopt="-sSfL --retry 5 --retry-delay 2 --retry-connrefused"
 
   case $(uname -s) in

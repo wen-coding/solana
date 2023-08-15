@@ -16,7 +16,7 @@ use {
         memory_region::{MemoryMapping, MemoryRegion},
         verifier::RequisiteVerifier,
         vm::{
-            BuiltInProgram, Config, ContextObject, EbpfVm, ProgramResult,
+            BuiltinProgram, Config, ContextObject, EbpfVm, ProgramResult,
             PROGRAM_ENVIRONMENT_KEY_SHIFT,
         },
     },
@@ -37,6 +37,8 @@ use {
         sync::{atomic::Ordering, Arc},
     },
 };
+
+pub const DEFAULT_COMPUTE_UNITS: u64 = 2_000;
 
 pub fn get_state(data: &[u8]) -> Result<&LoaderV4State, InstructionError> {
     unsafe {
@@ -66,17 +68,10 @@ fn get_state_mut(data: &mut [u8]) -> Result<&mut LoaderV4State, InstructionError
     }
 }
 
-pub fn load_program_from_account(
-    _feature_set: &FeatureSet,
+pub fn create_program_runtime_environment_v2<'a>(
     compute_budget: &ComputeBudget,
-    log_collector: Option<Rc<RefCell<LogCollector>>>,
-    program: &BorrowedAccount,
     debugging_features: bool,
-) -> Result<(Arc<LoadedProgram>, LoadProgramMetrics), InstructionError> {
-    let mut load_program_metrics = LoadProgramMetrics {
-        program_id: program.get_key().to_string(),
-        ..LoadProgramMetrics::default()
-    };
+) -> BuiltinProgram<InvokeContext<'a>> {
     let config = Config {
         max_call_depth: compute_budget.max_call_depth,
         stack_frame_size: compute_budget.stack_frame_size,
@@ -95,17 +90,27 @@ pub fn load_program_from_account(
             .unwrap_or(0),
         external_internal_function_hash_collision: true,
         reject_callx_r10: true,
-        dynamic_stack_frames: true,
-        enable_sdiv: true,
+        enable_sbpf_v1: false,
+        enable_sbpf_v2: true,
         optimize_rodata: true,
-        static_syscalls: true,
-        enable_elf_vaddr: true,
-        reject_rodata_stack_overlap: true,
         new_elf_parser: true,
         aligned_memory_mapping: true,
         // Warning, do not use `Config::default()` so that configuration here is explicit.
     };
-    let loader = BuiltInProgram::new_loader(config);
+    BuiltinProgram::new_loader(config)
+}
+
+pub fn load_program_from_account(
+    _feature_set: &FeatureSet,
+    compute_budget: &ComputeBudget,
+    log_collector: Option<Rc<RefCell<LogCollector>>>,
+    program: &BorrowedAccount,
+    debugging_features: bool,
+) -> Result<(Arc<LoadedProgram>, LoadProgramMetrics), InstructionError> {
+    let mut load_program_metrics = LoadProgramMetrics {
+        program_id: program.get_key().to_string(),
+        ..LoadProgramMetrics::default()
+    };
     let state = get_state(program.get_data())?;
     let programdata = program
         .get_data()
@@ -113,7 +118,10 @@ pub fn load_program_from_account(
         .ok_or(InstructionError::AccountDataTooSmall)?;
     let loaded_program = LoadedProgram::new(
         &loader_v4::id(),
-        Arc::new(loader),
+        Arc::new(create_program_runtime_environment_v2(
+            compute_budget,
+            debugging_features,
+        )),
         state.slot,
         state.slot.saturating_add(1),
         None,
@@ -142,8 +150,9 @@ fn calculate_heap_cost(heap_size: u64, heap_cost: u64) -> u64 {
 pub fn create_vm<'a, 'b>(
     invoke_context: &'a mut InvokeContext<'b>,
     program: &'a Executable<RequisiteVerifier, InvokeContext<'b>>,
-) -> Result<EbpfVm<'a, RequisiteVerifier, InvokeContext<'b>>, Box<dyn std::error::Error>> {
+) -> Result<EbpfVm<'a, InvokeContext<'b>>, Box<dyn std::error::Error>> {
     let config = program.get_config();
+    let sbpf_version = program.get_sbpf_version();
     let compute_budget = invoke_context.get_compute_budget();
     let heap_size = compute_budget.heap_size.unwrap_or(HEAP_LENGTH);
     invoke_context.consume_checked(calculate_heap_cost(
@@ -161,22 +170,28 @@ pub fn create_vm<'a, 'b>(
         MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
     ];
     let log_collector = invoke_context.get_log_collector();
-    let memory_mapping = MemoryMapping::new(regions, config).map_err(|err| {
+    let memory_mapping = MemoryMapping::new(regions, config, sbpf_version).map_err(|err| {
         ic_logger_msg!(log_collector, "Failed to create SBF VM: {}", err);
         Box::new(InstructionError::ProgramEnvironmentSetupFailure)
     })?;
     Ok(EbpfVm::new(
-        program,
+        config,
+        sbpf_version,
         invoke_context,
         memory_mapping,
         stack_len,
     ))
 }
 
-fn execute(
-    invoke_context: &mut InvokeContext,
-    program: &Executable<RequisiteVerifier, InvokeContext<'static>>,
+fn execute<'a, 'b: 'a>(
+    invoke_context: &'a mut InvokeContext<'b>,
+    executable: &'a Executable<RequisiteVerifier, InvokeContext<'static>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // We dropped the lifetime tracking in the Executor by setting it to 'static,
+    // thus we need to reintroduce the correct lifetime of InvokeContext here again.
+    let executable = unsafe {
+        std::mem::transmute::<_, &'a Executable<RequisiteVerifier, InvokeContext<'b>>>(executable)
+    };
     let log_collector = invoke_context.get_log_collector();
     let stack_height = invoke_context.get_stack_height();
     let transaction_context = &invoke_context.transaction_context;
@@ -185,21 +200,16 @@ fn execute(
     #[cfg(any(target_os = "windows", not(target_arch = "x86_64")))]
     let use_jit = false;
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
-    let use_jit = program.get_compiled_program().is_some();
+    let use_jit = executable.get_compiled_program().is_some();
 
     let compute_meter_prev = invoke_context.get_remaining();
     let mut create_vm_time = Measure::start("create_vm");
-    let mut vm = create_vm(
-        invoke_context,
-        // We dropped the lifetime tracking in the Executor by setting it to 'static,
-        // thus we need to reintroduce the correct lifetime of InvokeContext here again.
-        unsafe { std::mem::transmute(program) },
-    )?;
+    let mut vm = create_vm(invoke_context, executable)?;
     create_vm_time.stop();
 
     let mut execute_time = Measure::start("execute");
     stable_log::program_invoke(&log_collector, &program_id, stack_height);
-    let (compute_units_consumed, result) = vm.execute_program(!use_jit);
+    let (compute_units_consumed, result) = vm.execute_program(executable, !use_jit);
     drop(vm);
     ic_logger_msg!(
         log_collector,
@@ -560,7 +570,7 @@ pub fn process_instruction_inner(
             .feature_set
             .is_active(&feature_set::native_programs_consume_cu::id())
         {
-            invoke_context.consume_checked(2000)?;
+            invoke_context.consume_checked(DEFAULT_COMPUTE_UNITS)?;
         }
         match limited_deserialize(instruction_data)? {
             LoaderV4Instruction::Write { offset, bytes } => {
@@ -606,9 +616,11 @@ pub fn process_instruction_inner(
             get_or_create_executor_time.as_us()
         );
         drop(program);
-        loaded_program.usage_counter.fetch_add(1, Ordering::Relaxed);
+        loaded_program
+            .ix_usage_counter
+            .fetch_add(1, Ordering::Relaxed);
         match &loaded_program.program {
-            LoadedProgramType::FailedVerification
+            LoadedProgramType::FailedVerification(_)
             | LoadedProgramType::Closed
             | LoadedProgramType::DelayVisibility => {
                 Err(Box::new(InstructionError::InvalidAccountData) as Box<dyn std::error::Error>)

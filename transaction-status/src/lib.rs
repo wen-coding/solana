@@ -1131,13 +1131,7 @@ impl EncodedTransaction {
                 .and_then(|bytes| bincode::deserialize(&bytes).ok()),
         };
 
-        transaction.filter(|transaction| {
-            transaction
-                .sanitize(
-                    true, // require_static_program_ids
-                )
-                .is_ok()
-        })
+        transaction.filter(|transaction| transaction.sanitize().is_ok())
     }
 }
 
@@ -1275,6 +1269,7 @@ pub struct UiParsedMessage {
     pub account_keys: Vec<ParsedAccount>,
     pub recent_blockhash: String,
     pub instructions: Vec<UiInstruction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_table_lookups: Option<Vec<UiAddressTableLookup>>,
 }
 

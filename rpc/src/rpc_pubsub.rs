@@ -635,7 +635,7 @@ mod tests {
             signature::{Keypair, Signer},
             stake::{
                 self, instruction as stake_instruction,
-                state::{Authorized, Lockup, StakeAuthorize, StakeState},
+                state::{Authorized, Lockup, StakeAuthorize, StakeStateV2},
             },
             system_instruction, system_program, system_transaction,
             transaction::{self, Transaction},
@@ -688,7 +688,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks.clone(),
@@ -878,7 +878,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks.clone(),
@@ -907,7 +907,7 @@ mod tests {
         let balance = {
             let bank = bank_forks.read().unwrap().working_bank();
             let rent = &bank.rent_collector().rent;
-            rent.minimum_balance(StakeState::size_of())
+            rent.minimum_balance(StakeStateV2::size_of())
         };
 
         let tx = system_transaction::transfer(&alice, &from.pubkey(), balance, blockhash);
@@ -1006,7 +1006,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks.clone(),
@@ -1145,7 +1145,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let rpc_subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &exit,
+            exit,
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks.clone(),
@@ -1201,7 +1201,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &exit,
+            exit,
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks.clone(),
@@ -1356,7 +1356,7 @@ mod tests {
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
         let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
-            &exit,
+            exit,
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             bank_forks,

@@ -1,15 +1,17 @@
 #![allow(clippy::integer_arithmetic)]
+
 use {
+    solana_accounts_db::epoch_accounts_hash::EpochAccountsHash,
     solana_runtime::{
         bank::Bank,
         bank_client::BankClient,
-        epoch_accounts_hash::EpochAccountsHash,
         genesis_utils::{create_genesis_config_with_leader, GenesisConfigInfo},
     },
     solana_sdk::{
         account::from_account,
         account_utils::StateMut,
         client::SyncClient,
+        epoch_schedule::{EpochSchedule, MINIMUM_SLOTS_PER_EPOCH},
         hash::Hash,
         message::Message,
         pubkey::Pubkey,
@@ -17,7 +19,7 @@ use {
         signature::{Keypair, Signer},
         stake::{
             self, instruction as stake_instruction,
-            state::{Authorized, Lockup, StakeState},
+            state::{Authorized, Lockup, StakeStateV2},
         },
         sysvar::{self, stake_history::StakeHistory},
     },
@@ -29,14 +31,26 @@ use {
     std::sync::Arc,
 };
 
-fn next_epoch(bank: &Arc<Bank>) -> Arc<Bank> {
+/// get bank at next epoch + `n` slots
+fn next_epoch_and_n_slots(bank: &Arc<Bank>, mut n: usize) -> Arc<Bank> {
     bank.squash();
-
-    Arc::new(Bank::new_from_parent(
+    let mut bank = Arc::new(Bank::new_from_parent(
         bank,
         &Pubkey::default(),
         bank.get_slots_in_epoch(bank.epoch()) + bank.slot(),
-    ))
+    ));
+
+    while n > 0 {
+        bank.squash();
+        bank = Arc::new(Bank::new_from_parent(
+            &bank,
+            &Pubkey::default(),
+            1 + bank.slot(),
+        ));
+        n -= 1;
+    }
+
+    bank
 }
 
 fn fill_epoch_with_votes(
@@ -86,6 +100,7 @@ fn warmed_up(bank: &Bank, stake_pubkey: &Pubkey) -> bool {
                 )
                 .unwrap(),
             ),
+            bank.new_warmup_cooldown_rate_epoch(),
         )
 }
 
@@ -100,6 +115,7 @@ fn get_staked(bank: &Bank, stake_pubkey: &Pubkey) -> u64 {
                 )
                 .unwrap(),
             ),
+            bank.new_warmup_cooldown_rate_epoch(),
         )
 }
 
@@ -129,7 +145,7 @@ fn test_stake_create_and_split_single_signature() {
 
     let lamports = {
         let rent = &bank.rent_collector().rent;
-        let rent_exempt_reserve = rent.minimum_balance(StakeState::size_of());
+        let rent_exempt_reserve = rent.minimum_balance(StakeStateV2::size_of());
         let minimum_delegation = solana_stake_program::get_minimum_delegation(&bank.feature_set);
         2 * (rent_exempt_reserve + minimum_delegation)
     };
@@ -205,7 +221,7 @@ fn test_stake_create_and_split_to_existing_system_account() {
 
     let lamports = {
         let rent = &bank.rent_collector().rent;
-        let rent_exempt_reserve = rent.minimum_balance(StakeState::size_of());
+        let rent_exempt_reserve = rent.minimum_balance(StakeStateV2::size_of());
         let minimum_delegation = solana_stake_program::get_minimum_delegation(&bank.feature_set);
         2 * (rent_exempt_reserve + minimum_delegation)
     };
@@ -280,6 +296,7 @@ fn test_stake_account_lifetime() {
         &solana_sdk::pubkey::new_rand(),
         2_000_000_000,
     );
+    genesis_config.epoch_schedule = EpochSchedule::new(MINIMUM_SLOTS_PER_EPOCH);
     genesis_config.rent = Rent::default();
     let bank = Bank::new_for_tests(&genesis_config);
     let mint_pubkey = mint_keypair.pubkey();
@@ -297,7 +314,7 @@ fn test_stake_account_lifetime() {
         let rent = &bank.rent_collector().rent;
         (
             rent.minimum_balance(VoteState::size_of()),
-            rent.minimum_balance(StakeState::size_of()),
+            rent.minimum_balance(StakeStateV2::size_of()),
             solana_stake_program::get_minimum_delegation(&bank.feature_set),
         )
     };
@@ -350,7 +367,7 @@ fn test_stake_account_lifetime() {
     // Test that correct lamports are staked
     let account = bank.get_account(&stake_pubkey).expect("account not found");
     let stake_state = account.state().expect("couldn't unpack account data");
-    if let StakeState::Stake(_meta, stake) = stake_state {
+    if let StakeStateV2::Stake(_meta, stake, _stake_flags) = stake_state {
         assert_eq!(stake.delegation.stake, stake_starting_delegation,);
     } else {
         panic!("wrong account type found")
@@ -374,7 +391,7 @@ fn test_stake_account_lifetime() {
     // Test that lamports are still staked
     let account = bank.get_account(&stake_pubkey).expect("account not found");
     let stake_state = account.state().expect("couldn't unpack account data");
-    if let StakeState::Stake(_meta, stake) = stake_state {
+    if let StakeStateV2::Stake(_meta, stake, _stake_flags) = stake_state {
         assert_eq!(stake.delegation.stake, stake_starting_delegation,);
     } else {
         panic!("wrong account type found")
@@ -385,7 +402,7 @@ fn test_stake_account_lifetime() {
             break;
         }
         // Cycle thru banks until we're fully warmed up
-        bank = next_epoch(&bank);
+        bank = next_epoch_and_n_slots(&bank, 0);
     }
 
     // Reward redemption
@@ -408,8 +425,8 @@ fn test_stake_account_lifetime() {
     let pre_staked = get_staked(&bank, &stake_pubkey);
     let pre_balance = bank.get_balance(&stake_pubkey);
 
-    // next epoch bank should pay rewards
-    bank = next_epoch(&bank);
+    // next epoch bank plus one additional slot should pay rewards
+    bank = next_epoch_and_n_slots(&bank, 1);
 
     // Test that balance increased, and that the balance got staked
     let staked = get_staked(&bank, &stake_pubkey);
@@ -477,7 +494,8 @@ fn test_stake_account_lifetime() {
         .send_and_confirm_message(&[&mint_keypair, &stake_keypair], message)
         .is_err());
 
-    let mut bank = next_epoch(&bank);
+    let mut bank = next_epoch_and_n_slots(&bank, 1);
+
     let bank_client = BankClient::new_shared(&bank);
 
     // assert we're still cooling down
@@ -522,7 +540,7 @@ fn test_stake_account_lifetime() {
         if get_staked(&bank, &split_stake_pubkey) == 0 {
             break;
         }
-        bank = next_epoch(&bank);
+        bank = next_epoch_and_n_slots(&bank, 1);
     }
     let bank_client = BankClient::new_shared(&bank);
 
@@ -597,7 +615,7 @@ fn test_create_stake_account_from_seed() {
     let authorized = Authorized::auto(&mint_pubkey);
     let (balance, delegation) = {
         let rent = &bank.rent_collector().rent;
-        let rent_exempt_reserve = rent.minimum_balance(StakeState::size_of());
+        let rent_exempt_reserve = rent.minimum_balance(StakeStateV2::size_of());
         let minimum_delegation = solana_stake_program::get_minimum_delegation(&bank.feature_set);
         (rent_exempt_reserve + minimum_delegation, minimum_delegation)
     };
@@ -623,7 +641,7 @@ fn test_create_stake_account_from_seed() {
     // Test that correct lamports are staked
     let account = bank.get_account(&stake_pubkey).expect("account not found");
     let stake_state = account.state().expect("couldn't unpack account data");
-    if let StakeState::Stake(_meta, stake) = stake_state {
+    if let StakeStateV2::Stake(_meta, stake, _) = stake_state {
         assert_eq!(stake.delegation.stake, delegation);
     } else {
         panic!("wrong account type found")

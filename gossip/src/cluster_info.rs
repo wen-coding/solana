@@ -99,8 +99,6 @@ use {
     thiserror::Error,
 };
 
-/// The Data plane fanout size, also used as the neighborhood size
-pub const DATA_PLANE_FANOUT: usize = 200;
 /// milliseconds we sleep for between gossip requests
 pub const GOSSIP_SLEEP_MILLIS: u64 = 100;
 /// The maximum size of a bloom filter
@@ -273,7 +271,7 @@ pub fn make_accounts_hashes_message(
 pub(crate) type Ping = ping_pong::Ping<[u8; GOSSIP_PING_TOKEN_SIZE]>;
 
 // TODO These messages should go through the gpu pipeline for spam filtering
-#[frozen_abi(digest = "Ctxue3UVFXXqnHoMVAPmfBoCy3Cyg7gNCYBY7Cg9P3so")]
+#[frozen_abi(digest = "6T2sn92PMrTijsgncH3bBZL4K5GUowb442cCw4y4DuwV")]
 #[derive(Serialize, Deserialize, Debug, AbiEnumVisitor, AbiExample)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Protocol {
@@ -502,7 +500,7 @@ impl ClusterInfo {
                 .packets_sent_gossip_requests_count
                 .add_relaxed(pings.len() as u64);
             let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-                recycler.clone(),
+                recycler,
                 "refresh_push_active_set",
                 &pings,
             );
@@ -826,7 +824,7 @@ impl ClusterInfo {
                     }
                     let ip_addr = node.gossip().as_ref().map(SocketAddr::ip).ok();
                     Some(format!(
-                        "{:15} {:2}| {:5} | {:44} |{:^9}| {:5}|  {:5}| {:5}| {:5}| {:5}| {:5}| {:5}| {:5}| {}\n",
+                        "{:15} {:2}| {:5} | {:44} |{:^9}| {:5}|  {:5}| {:5}| {:5}| {:5}| {:5}| {:5}| {}\n",
                         node.gossip()
                             .ok()
                             .filter(|addr| self.socket_addr_space.check(addr))
@@ -848,9 +846,8 @@ impl ClusterInfo {
                         self.addr_to_string(&ip_addr, &node.tpu(contact_info::Protocol::UDP).ok()),
                         self.addr_to_string(&ip_addr, &node.tpu_forwards(contact_info::Protocol::UDP).ok()),
                         self.addr_to_string(&ip_addr, &node.tvu(contact_info::Protocol::UDP).ok()),
-                        self.addr_to_string(&ip_addr, &node.tvu_forwards().ok()),
-                        self.addr_to_string(&ip_addr, &node.repair().ok()),
-                        self.addr_to_string(&ip_addr, &node.serve_repair().ok()),
+                        self.addr_to_string(&ip_addr, &node.tvu(contact_info::Protocol::QUIC).ok()),
+                        self.addr_to_string(&ip_addr, &node.serve_repair(contact_info::Protocol::UDP).ok()),
                         node.shred_version(),
                     ))
                 }
@@ -859,9 +856,9 @@ impl ClusterInfo {
 
         format!(
             "IP Address        |Age(ms)| Node identifier                              \
-             | Version |Gossip|TPUvote| TPU  |TPUfwd| TVU  |TVUfwd|Repair|ServeR|ShredVer\n\
-             ------------------+-------+----------------------------------------------\
-             +---------+------+-------+------+------+------+------+------+------+--------\n\
+             | Version |Gossip|TPUvote| TPU  |TPUfwd| TVU  |TVU Q |ServeR|ShredVer\n\
+             ------------------+-------+---------------------------------------\
+             +---------+------+-------+------+------+------+------+------+--------\n\
              {}\
              Nodes: {}{}{}",
             nodes.join(""),
@@ -1348,7 +1345,7 @@ impl ClusterInfo {
                 node.pubkey() != &self_pubkey
                     && node.shred_version() == self_shred_version
                     && self.check_socket_addr_space(&node.tvu(contact_info::Protocol::UDP))
-                    && self.check_socket_addr_space(&node.serve_repair())
+                    && self.check_socket_addr_space(&node.serve_repair(contact_info::Protocol::UDP))
                     && match gossip_crds.get::<&LowestSlot>(*node.pubkey()) {
                         None => true, // fallback to legacy behavior
                         Some(lowest_slot) => lowest_slot.lowest <= slot,
@@ -1413,9 +1410,8 @@ impl ClusterInfo {
         const THROTTLE_DELAY: u64 = CRDS_GOSSIP_PULL_CRDS_TIMEOUT_MS / 2;
         let entrypoint = {
             let mut entrypoints = self.entrypoints.write().unwrap();
-            let entrypoint = match entrypoints.choose_mut(&mut rand::thread_rng()) {
-                Some(entrypoint) => entrypoint,
-                None => return,
+            let Some(entrypoint) = entrypoints.choose_mut(&mut rand::thread_rng()) else {
+                return;
             };
             if !pulls.is_empty() {
                 let now = timestamp();
@@ -1654,7 +1650,7 @@ impl ClusterInfo {
         );
         if !reqs.is_empty() {
             let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-                recycler.clone(),
+                recycler,
                 "run_gossip",
                 &reqs,
             );
@@ -2035,7 +2031,7 @@ impl ClusterInfo {
         let output_size_limit =
             self.update_data_budget(stakes.len()) / PULL_RESPONSE_MIN_SERIALIZED_SIZE;
         let mut packet_batch =
-            PacketBatch::new_unpinned_with_recycler(recycler.clone(), 64, "handle_pull_requests");
+            PacketBatch::new_unpinned_with_recycler(recycler, 64, "handle_pull_requests");
         let (caller_and_filters, addrs): (Vec<_>, Vec<_>) = {
             let mut rng = rand::thread_rng();
             let check_pull_request =
@@ -2277,7 +2273,7 @@ impl ClusterInfo {
             None
         } else {
             let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-                recycler.clone(),
+                recycler,
                 "handle_ping_messages",
                 &pongs_and_dests,
             );
@@ -2373,7 +2369,7 @@ impl ClusterInfo {
             return;
         }
         let mut packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-            recycler.clone(),
+            recycler,
             "handle_batch_push_messages",
             &prune_messages,
         );
@@ -2517,9 +2513,6 @@ impl ClusterInfo {
             stakes,
             response_sender,
         );
-        self.stats
-            .process_gossip_packets_iterations_since_last_report
-            .add_relaxed(1);
         Ok(())
     }
 
@@ -2793,46 +2786,12 @@ fn get_epoch_duration(bank_forks: Option<&RwLock<BankForks>>, stats: &GossipStat
     Duration::from_millis(num_slots * DEFAULT_MS_PER_SLOT)
 }
 
-/// Turbine logic
-/// 1 - For the current node find out if it is in layer 1
-/// 1.1 - If yes, then broadcast to all layer 1 nodes
-///      1 - using the layer 1 index, broadcast to all layer 2 nodes assuming you know neighborhood size
-/// 1.2 - If no, then figure out what layer the node is in and who the neighbors are and only broadcast to them
-///      1 - also check if there are nodes in the next layer and repeat the layer 1 to layer 2 logic
-
-/// Returns Neighbor Nodes and Children Nodes `(neighbors, children)` for a given node based on its stake
-pub fn compute_retransmit_peers<T: Copy>(
-    fanout: usize,
-    index: usize, // Local node's index withing the nodes slice.
-    nodes: &[T],
-) -> (Vec<T> /*neighbors*/, Vec<T> /*children*/) {
-    // 1st layer: fanout    nodes starting at 0
-    // 2nd layer: fanout**2 nodes starting at fanout
-    // 3rd layer: fanout**3 nodes starting at fanout + fanout**2
-    // ...
-    // Each layer is divided into neighborhoods of fanout nodes each.
-    let offset = index % fanout; // Node's index within its neighborhood.
-    let anchor = index - offset; // First node in the neighborhood.
-    let neighbors = (anchor..)
-        .take(fanout)
-        .map(|i| nodes.get(i).copied())
-        .while_some()
-        .collect();
-    let children = ((anchor + 1) * fanout + offset..)
-        .step_by(fanout)
-        .take(fanout)
-        .map(|i| nodes.get(i).copied())
-        .while_some()
-        .collect();
-    (neighbors, children)
-}
-
 #[derive(Debug)]
 pub struct Sockets {
     pub gossip: UdpSocket,
     pub ip_echo: Option<TcpListener>,
     pub tvu: Vec<UdpSocket>,
-    pub tvu_forwards: Vec<UdpSocket>,
+    pub tvu_quic: UdpSocket,
     pub tpu: Vec<UdpSocket>,
     pub tpu_forwards: Vec<UdpSocket>,
     pub tpu_vote: Vec<UdpSocket>,
@@ -2840,6 +2799,7 @@ pub struct Sockets {
     pub repair: UdpSocket,
     pub retransmit_sockets: Vec<UdpSocket>,
     pub serve_repair: UdpSocket,
+    pub serve_repair_quic: UdpSocket,
     pub ancestor_hashes_requests: UdpSocket,
     pub tpu_quic: UdpSocket,
     pub tpu_forwards_quic: UdpSocket,
@@ -2868,7 +2828,7 @@ impl Node {
             bind_common_in_range(localhost_ip_addr, port_range).unwrap();
         let gossip_addr = SocketAddr::new(localhost_ip_addr, gossip_port);
         let tvu = UdpSocket::bind(&localhost_bind_addr).unwrap();
-        let tvu_forwards = UdpSocket::bind(&localhost_bind_addr).unwrap();
+        let tvu_quic = UdpSocket::bind(&localhost_bind_addr).unwrap();
         let ((_tpu_forwards_port, tpu_forwards), (_tpu_forwards_quic_port, tpu_forwards_quic)) =
             bind_two_in_range_with_offset(localhost_ip_addr, port_range, QUIC_PORT_OFFSET).unwrap();
         let tpu_vote = UdpSocket::bind(&localhost_bind_addr).unwrap();
@@ -2880,6 +2840,7 @@ impl Node {
         let broadcast = vec![UdpSocket::bind(&unspecified_bind_addr).unwrap()];
         let retransmit_socket = UdpSocket::bind(&unspecified_bind_addr).unwrap();
         let serve_repair = UdpSocket::bind(&localhost_bind_addr).unwrap();
+        let serve_repair_quic = UdpSocket::bind(&localhost_bind_addr).unwrap();
         let ancestor_hashes_requests = UdpSocket::bind(&unspecified_bind_addr).unwrap();
 
         let mut info = ContactInfo::new(
@@ -2897,12 +2858,7 @@ impl Node {
         }
         set_socket!(set_gossip, gossip_addr, "gossip");
         set_socket!(set_tvu, tvu.local_addr().unwrap(), "TVU");
-        set_socket!(
-            set_tvu_forwards,
-            tvu_forwards.local_addr().unwrap(),
-            "TVU-forwards"
-        );
-        set_socket!(set_repair, repair.local_addr().unwrap(), "repair");
+        set_socket!(set_tvu_quic, tvu_quic.local_addr().unwrap(), "TVU QUIC");
         set_socket!(set_tpu, tpu.local_addr().unwrap(), "TPU");
         set_socket!(
             set_tpu_forwards,
@@ -2917,13 +2873,18 @@ impl Node {
             serve_repair.local_addr().unwrap(),
             "serve-repair"
         );
+        set_socket!(
+            set_serve_repair_quic,
+            serve_repair_quic.local_addr().unwrap(),
+            "serve-repair QUIC"
+        );
         Node {
             info,
             sockets: Sockets {
                 gossip,
                 ip_echo: Some(ip_echo),
                 tvu: vec![tvu],
-                tvu_forwards: vec![tvu_forwards],
+                tvu_quic,
                 tpu: vec![tpu],
                 tpu_forwards: vec![tpu_forwards],
                 tpu_vote: vec![tpu_vote],
@@ -2931,6 +2892,7 @@ impl Node {
                 repair,
                 retransmit_sockets: vec![retransmit_socket],
                 serve_repair,
+                serve_repair_quic,
                 ancestor_hashes_requests,
                 tpu_quic,
                 tpu_forwards_quic,
@@ -2967,15 +2929,16 @@ impl Node {
         let (gossip_port, (gossip, ip_echo)) =
             Self::get_gossip_port(gossip_addr, port_range, bind_ip_addr);
         let (tvu_port, tvu) = Self::bind(bind_ip_addr, port_range);
-        let (tvu_forwards_port, tvu_forwards) = Self::bind(bind_ip_addr, port_range);
+        let (tvu_quic_port, tvu_quic) = Self::bind(bind_ip_addr, port_range);
         let ((tpu_port, tpu), (_tpu_quic_port, tpu_quic)) =
             bind_two_in_range_with_offset(bind_ip_addr, port_range, QUIC_PORT_OFFSET).unwrap();
         let ((tpu_forwards_port, tpu_forwards), (_tpu_forwards_quic_port, tpu_forwards_quic)) =
             bind_two_in_range_with_offset(bind_ip_addr, port_range, QUIC_PORT_OFFSET).unwrap();
         let (tpu_vote_port, tpu_vote) = Self::bind(bind_ip_addr, port_range);
         let (_, retransmit_socket) = Self::bind(bind_ip_addr, port_range);
-        let (repair_port, repair) = Self::bind(bind_ip_addr, port_range);
+        let (_, repair) = Self::bind(bind_ip_addr, port_range);
         let (serve_repair_port, serve_repair) = Self::bind(bind_ip_addr, port_range);
+        let (serve_repair_quic_port, serve_repair_quic) = Self::bind(bind_ip_addr, port_range);
         let (_, broadcast) = Self::bind(bind_ip_addr, port_range);
         let (_, ancestor_hashes_requests) = Self::bind(bind_ip_addr, port_range);
 
@@ -2998,14 +2961,18 @@ impl Node {
         }
         set_socket!(set_gossip, gossip_port, "gossip");
         set_socket!(set_tvu, tvu_port, "TVU");
-        set_socket!(set_tvu_forwards, tvu_forwards_port, "TVU-forwards");
-        set_socket!(set_repair, repair_port, "repair");
+        set_socket!(set_tvu_quic, tvu_quic_port, "TVU QUIC");
         set_socket!(set_tpu, tpu_port, "TPU");
         set_socket!(set_tpu_forwards, tpu_forwards_port, "TPU-forwards");
         set_socket!(set_tpu_vote, tpu_vote_port, "TPU-vote");
         set_socket!(set_rpc, rpc_port, "RPC");
         set_socket!(set_rpc_pubsub, rpc_pubsub_port, "RPC-pubsub");
         set_socket!(set_serve_repair, serve_repair_port, "serve-repair");
+        set_socket!(
+            set_serve_repair_quic,
+            serve_repair_quic_port,
+            "serve-repair QUIC"
+        );
         trace!("new ContactInfo: {:?}", info);
 
         Node {
@@ -3014,7 +2981,7 @@ impl Node {
                 gossip,
                 ip_echo: Some(ip_echo),
                 tvu: vec![tvu],
-                tvu_forwards: vec![tvu_forwards],
+                tvu_quic,
                 tpu: vec![tpu],
                 tpu_forwards: vec![tpu_forwards],
                 tpu_vote: vec![tpu_vote],
@@ -3022,6 +2989,7 @@ impl Node {
                 repair,
                 retransmit_sockets: vec![retransmit_socket],
                 serve_repair,
+                serve_repair_quic,
                 ancestor_hashes_requests,
                 tpu_quic,
                 tpu_forwards_quic,
@@ -3042,10 +3010,7 @@ impl Node {
 
         let (tvu_port, tvu_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 8).expect("tvu multi_bind");
-
-        let (tvu_forwards_port, tvu_forwards_sockets) =
-            multi_bind_in_range(bind_ip_addr, port_range, 8).expect("tvu_forwards multi_bind");
-
+        let (tvu_quic_port, tvu_quic) = Self::bind(bind_ip_addr, port_range);
         let (tpu_port, tpu_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 32).expect("tpu multi_bind");
 
@@ -3071,8 +3036,9 @@ impl Node {
         let (_, retransmit_sockets) =
             multi_bind_in_range(bind_ip_addr, port_range, 8).expect("retransmit multi_bind");
 
-        let (repair_port, repair) = Self::bind(bind_ip_addr, port_range);
+        let (_, repair) = Self::bind(bind_ip_addr, port_range);
         let (serve_repair_port, serve_repair) = Self::bind(bind_ip_addr, port_range);
+        let (serve_repair_quic_port, serve_repair_quic) = Self::bind(bind_ip_addr, port_range);
 
         let (_, broadcast) =
             multi_bind_in_range(bind_ip_addr, port_range, 4).expect("broadcast multi_bind");
@@ -3087,14 +3053,14 @@ impl Node {
         let addr = gossip_addr.ip();
         let _ = info.set_gossip((addr, gossip_port));
         let _ = info.set_tvu((addr, tvu_port));
-        let _ = info.set_tvu_forwards((addr, tvu_forwards_port));
-        let _ = info.set_repair((addr, repair_port));
+        let _ = info.set_tvu_quic((addr, tvu_quic_port));
         let _ = info.set_tpu(public_tpu_addr.unwrap_or_else(|| SocketAddr::new(addr, tpu_port)));
         let _ = info.set_tpu_forwards(
             public_tpu_forwards_addr.unwrap_or_else(|| SocketAddr::new(addr, tpu_forwards_port)),
         );
         let _ = info.set_tpu_vote((addr, tpu_vote_port));
         let _ = info.set_serve_repair((addr, serve_repair_port));
+        let _ = info.set_serve_repair((addr, serve_repair_quic_port));
         trace!("new ContactInfo: {:?}", info);
 
         Node {
@@ -3102,7 +3068,7 @@ impl Node {
             sockets: Sockets {
                 gossip,
                 tvu: tvu_sockets,
-                tvu_forwards: tvu_forwards_sockets,
+                tvu_quic,
                 tpu: tpu_sockets,
                 tpu_forwards: tpu_forwards_sockets,
                 tpu_vote: tpu_vote_sockets,
@@ -3110,6 +3076,7 @@ impl Node {
                 repair,
                 retransmit_sockets,
                 serve_repair,
+                serve_repair_quic,
                 ip_echo: Some(ip_echo),
                 ancestor_hashes_requests,
                 tpu_quic,
@@ -3129,7 +3096,7 @@ pub fn push_messages_to_peer(
         .map(move |payload| (peer_gossip, Protocol::PushMessage(self_id, payload)))
         .collect();
     let packet_batch = PacketBatch::new_unpinned_with_recycler_data_and_dests(
-        PacketBatchRecycler::default(),
+        &PacketBatchRecycler::default(),
         "push_messages_to_peer",
         &reqs,
     );
@@ -3218,9 +3185,6 @@ mod tests {
             duplicate_shred::{self, tests::new_rand_shred, MAX_DUPLICATE_SHREDS},
         },
         itertools::izip,
-        rand::{seq::SliceRandom, SeedableRng},
-        rand_chacha::ChaChaRng,
-        regex::Regex,
         solana_ledger::shred::Shredder,
         solana_net_utils::MINIMUM_VALIDATOR_PORT_RANGE_WIDTH,
         solana_sdk::signature::{Keypair, Signer},
@@ -3249,91 +3213,6 @@ mod tests {
             &LegacyContactInfo::try_from(&node).unwrap(),
             &SocketAddrSpace::Unspecified
         ));
-    }
-
-    #[test]
-    fn test_cluster_info_trace() {
-        solana_logger::setup();
-        let keypair = Keypair::from_base58_string("3jATNWfbii1btv6nCpToAXAJz6a4km5HsLSWiwLfNvHNQAmvksLFVAKGUz286bXb9N4ivXx8nuwkn91PFDTyoFEp");
-
-        let node = {
-            let tpu = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8900);
-            let _tpu_quic = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8901);
-
-            let gossip = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8888);
-            let tvu = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8902);
-            let tvu_forwards = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8903);
-            let tpu_forwards = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8904);
-
-            let tpu_vote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8906);
-            let repair = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8907);
-            let rpc = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8908);
-            let rpc_pubsub = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8909);
-
-            let serve_repair = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8910);
-
-            let mut info = ContactInfo::new(
-                keypair.pubkey(),
-                timestamp(), // wallclock
-                0u16,        // shred_version
-            );
-            info.set_gossip(gossip).unwrap();
-            info.set_tvu(tvu).unwrap();
-            info.set_tvu_forwards(tvu_forwards).unwrap();
-            info.set_repair(repair).unwrap();
-            info.set_tpu(tpu).unwrap();
-            info.set_tpu_forwards(tpu_forwards).unwrap();
-            info.set_tpu_vote(tpu_vote).unwrap();
-            info.set_rpc(rpc).unwrap();
-            info.set_rpc_pubsub(rpc_pubsub).unwrap();
-            info.set_serve_repair(serve_repair).unwrap();
-            Node {
-                info,
-                sockets: Sockets {
-                    gossip: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                    ip_echo: None,
-                    tvu: vec![],
-                    tvu_forwards: vec![],
-                    tpu: vec![],
-                    tpu_forwards: vec![],
-                    tpu_vote: vec![],
-                    broadcast: vec![],
-                    repair: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                    retransmit_sockets: vec![],
-                    serve_repair: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                    ancestor_hashes_requests: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                    tpu_quic: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                    tpu_forwards_quic: UdpSocket::bind("0.0.0.0:0").unwrap(),
-                },
-            }
-        };
-
-        let cluster_info = Arc::new(ClusterInfo::new(
-            node.info,
-            Arc::new(keypair),
-            SocketAddrSpace::Unspecified,
-        ));
-
-        let golden = r#"
-IP Address        |Age(ms)| Node identifier                              | Version |Gossip|TPUvote| TPU  |TPUfwd| TVU  |TVUfwd|Repair|ServeR|ShredVer
-------------------+-------+----------------------------------------------+---------+------+-------+------+------+------+------+------+------+--------
-127.0.0.1       me|     \d | 7fGBVaezz2YrTxAkwvLjBZpxrGEfNsd14Jxw9W5Df5zY |    -    | 8888 |  8906 | 8900 | 8904 | 8902 | 8903 | 8907 | 8910 | 0
-Nodes: 1
-
-RPC Address       |Age(ms)| Node identifier                              | Version | RPC  |PubSub|ShredVer
-------------------+-------+----------------------------------------------+---------+------+------+--------
-127.0.0.1       me|     \d | 7fGBVaezz2YrTxAkwvLjBZpxrGEfNsd14Jxw9W5Df5zY |    -    | 8908 | 8909 | 0
-RPC Enabled Nodes: 1"#;
-
-        let re = Regex::new(golden).unwrap();
-
-        let output = format!(
-            "\n{}\n\n{}",
-            cluster_info.contact_info_trace(),
-            cluster_info.rpc_info_trace()
-        );
-
-        assert!(re.is_match(&output));
     }
 
     #[test]
@@ -3754,6 +3633,7 @@ RPC Enabled Nodes: 1"#;
     fn check_node_sockets(node: &Node, ip: IpAddr, range: (u16, u16)) {
         check_socket(&node.sockets.gossip, ip, range);
         check_socket(&node.sockets.repair, ip, range);
+        check_socket(&node.sockets.tvu_quic, ip, range);
 
         check_sockets(&node.sockets.tvu, ip, range);
         check_sockets(&node.sockets.tpu, ip, range);
@@ -4636,144 +4516,6 @@ RPC Enabled Nodes: 1"#;
         );
         assert!(entrypoints_processed);
         assert_eq!(cluster_info.my_shred_version(), 2); // <--- No change to shred version
-    }
-
-    #[test]
-    fn test_compute_retransmit_peers_small() {
-        const FANOUT: usize = 3;
-        let index = vec![
-            14, 15, 28, // 1st layer
-            // 2nd layer
-            29, 4, 5, // 1st neighborhood
-            9, 16, 7, // 2nd neighborhood
-            26, 23, 2, // 3rd neighborhood
-            // 3rd layer
-            31, 3, 17, // 1st neighborhood
-            20, 25, 0, // 2nd neighborhood
-            13, 30, 18, // 3rd neighborhood
-            19, 21, 22, // 4th neighborhood
-            6, 8, 11, // 5th neighborhood
-            27, 1, 10, // 6th neighborhood
-            12, 24, 34, // 7th neighborhood
-            33, 32, // 8th neighborhood
-        ];
-        // 1st layer
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 0, &index),
-            (vec![14, 15, 28], vec![29, 9, 26])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 1, &index),
-            (vec![14, 15, 28], vec![4, 16, 23])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 2, &index),
-            (vec![14, 15, 28], vec![5, 7, 2])
-        );
-        // 2nd layer, 1st neighborhood
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 3, &index),
-            (vec![29, 4, 5], vec![31, 20, 13])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 4, &index),
-            (vec![29, 4, 5], vec![3, 25, 30])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 5, &index),
-            (vec![29, 4, 5], vec![17, 0, 18])
-        );
-        // 2nd layer, 2nd neighborhood
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 6, &index),
-            (vec![9, 16, 7], vec![19, 6, 27])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 7, &index),
-            (vec![9, 16, 7], vec![21, 8, 1])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 8, &index),
-            (vec![9, 16, 7], vec![22, 11, 10])
-        );
-        // 2nd layer, 3rd neighborhood
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 9, &index),
-            (vec![26, 23, 2], vec![12, 33])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 10, &index),
-            (vec![26, 23, 2], vec![24, 32])
-        );
-        assert_eq!(
-            compute_retransmit_peers(FANOUT, 11, &index),
-            (vec![26, 23, 2], vec![34])
-        );
-        // 3rd layer
-        let num_nodes = index.len();
-        for k in (12..num_nodes).step_by(3) {
-            let end = num_nodes.min(k + 3);
-            let neighbors = index[k..end].to_vec();
-            for i in k..end {
-                assert_eq!(
-                    compute_retransmit_peers(FANOUT, i, &index),
-                    (neighbors.clone(), vec![])
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_compute_retransmit_peers_with_fanout_five() {
-        const FANOUT: usize = 5;
-        const NUM_NODES: usize = 2048;
-        const SEED: [u8; 32] = [0x55; 32];
-        let mut rng = ChaChaRng::from_seed(SEED);
-        let mut index: Vec<_> = (0..NUM_NODES).collect();
-        index.shuffle(&mut rng);
-        let (neighbors, children) = compute_retransmit_peers(FANOUT, 17, &index);
-        assert_eq!(neighbors, vec![1410, 1293, 1810, 552, 512]);
-        assert_eq!(children, vec![511, 1989, 283, 1606, 1154]);
-    }
-
-    #[test]
-    fn test_compute_retransmit_peers_large() {
-        const FANOUT: usize = 7;
-        const NUM_NODES: usize = 512;
-        let mut rng = rand::thread_rng();
-        let mut index: Vec<_> = (0..NUM_NODES).collect();
-        index.shuffle(&mut rng);
-        let pos: HashMap<usize, usize> = index
-            .iter()
-            .enumerate()
-            .map(|(i, node)| (*node, i))
-            .collect();
-        let mut seen = vec![0; NUM_NODES];
-        for i in 0..NUM_NODES {
-            let node = index[i];
-            let (neighbors, children) = compute_retransmit_peers(FANOUT, i, &index);
-            assert!(neighbors.len() <= FANOUT);
-            assert!(children.len() <= FANOUT);
-            // If x is neighbor of y then y is also neighbor of x.
-            for other in &neighbors {
-                let j = pos[other];
-                let (other_neighbors, _) = compute_retransmit_peers(FANOUT, j, &index);
-                assert!(other_neighbors.contains(&node));
-            }
-            for i in children {
-                seen[i] += 1;
-            }
-        }
-        // Except for the first layer, each node
-        // is child of exactly one other node.
-        let (seed, _) = compute_retransmit_peers(FANOUT, 0, &index);
-        for (i, k) in seen.into_iter().enumerate() {
-            if seed.contains(&i) {
-                assert_eq!(k, 0);
-            } else {
-                assert_eq!(k, 1);
-            }
-        }
     }
 
     #[test]

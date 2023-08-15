@@ -1,8 +1,9 @@
 use {
     clap::{value_t, values_t_or_exit, ArgMatches},
-    solana_runtime::{
-        accounts_db::{AccountsDb, AccountsDbConfig, FillerAccountsConfig},
+    solana_accounts_db::{
+        accounts_db::{AccountsDbConfig, FillerAccountsConfig},
         accounts_index::{AccountsIndexConfig, IndexLimitMb},
+        partitioned_rewards::TestPartitionedEpochRewards,
     },
     solana_sdk::clock::Slot,
     std::path::{Path, PathBuf},
@@ -25,6 +26,15 @@ pub fn get_accounts_db_config(
         } else {
             IndexLimitMb::Unspecified
         };
+    let test_partitioned_epoch_rewards =
+        if arg_matches.is_present("partitioned_epoch_rewards_compare_calculation") {
+            TestPartitionedEpochRewards::CompareResults
+        } else if arg_matches.is_present("partitioned_epoch_rewards_force_enable_single_slot") {
+            TestPartitionedEpochRewards::ForcePartitionedEpochRewardsInOneBlock
+        } else {
+            TestPartitionedEpochRewards::None
+        };
+
     let accounts_index_drives: Vec<PathBuf> = if arg_matches.is_present("accounts_index_path") {
         values_t_or_exit!(arg_matches, "accounts_index_path", String)
             .into_iter()
@@ -47,12 +57,13 @@ pub fn get_accounts_db_config(
 
     AccountsDbConfig {
         index: Some(accounts_index_config),
-        accounts_hash_cache_path: Some(ledger_path.join(AccountsDb::ACCOUNTS_HASH_CACHE_DIR)),
+        base_working_path: Some(ledger_path.to_path_buf()),
         filler_accounts_config,
         ancient_append_vec_offset: value_t!(arg_matches, "accounts_db_ancient_append_vecs", i64)
             .ok(),
         exhaustively_verify_refcounts: arg_matches.is_present("accounts_db_verify_refcounts"),
         skip_initial_hash_calc: arg_matches.is_present("accounts_db_skip_initial_hash_calculation"),
+        test_partitioned_epoch_rewards,
         ..AccountsDbConfig::default()
     }
 }

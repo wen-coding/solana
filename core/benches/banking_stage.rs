@@ -11,13 +11,15 @@ use {
     solana_client::connection_cache::ConnectionCache,
     solana_core::{
         banking_stage::{
-            committer::Committer, consumer::Consumer, BankingStage, BankingStageStats,
+            committer::Committer,
+            consumer::Consumer,
+            leader_slot_metrics::LeaderSlotMetricsTracker,
+            qos_service::QosService,
+            unprocessed_packet_batches::*,
+            unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
+            BankingStage, BankingStageStats,
         },
         banking_trace::{BankingPacketBatch, BankingTracer},
-        leader_slot_banking_stage_metrics::LeaderSlotMetricsTracker,
-        qos_service::QosService,
-        unprocessed_packet_batches::*,
-        unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
     },
     solana_entry::entry::{next_hash, Entry},
     solana_gossip::cluster_info::{ClusterInfo, Node},
@@ -130,10 +132,10 @@ fn make_accounts_txs(txes: usize, mint_keypair: &Keypair, hash: Hash) -> Vec<Tra
         .into_par_iter()
         .map(|_| {
             let mut new = dummy.clone();
-            let sig: Vec<_> = (0..64).map(|_| thread_rng().gen::<u8>()).collect();
+            let sig: [u8; 64] = std::array::from_fn(|_| thread_rng().gen::<u8>());
             new.message.account_keys[0] = pubkey::new_rand();
             new.message.account_keys[1] = pubkey::new_rand();
-            new.signatures = vec![Signature::new(&sig[0..64])];
+            new.signatures = vec![Signature::from(sig)];
             new
         })
         .collect()
@@ -297,7 +299,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
             None,
             s,
             None,
-            Arc::new(ConnectionCache::default()),
+            Arc::new(ConnectionCache::new("connection_cache_test")),
             bank_forks,
             &Arc::new(PrioritizationFeeCache::new(0u64)),
         );

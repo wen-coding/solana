@@ -3,8 +3,7 @@
 use {
     crate::{
         accounts_background_service::{AbsRequestSender, SnapshotRequest, SnapshotRequestType},
-        bank::{Bank, SquashTiming},
-        epoch_accounts_hash,
+        bank::{epoch_accounts_hash_utils, Bank, SquashTiming},
         snapshot_config::SnapshotConfig,
     },
     log::*,
@@ -636,11 +635,11 @@ impl BankForks {
             return false;
         }
 
-        if !epoch_accounts_hash::is_enabled_this_epoch(bank) {
+        if !epoch_accounts_hash_utils::is_enabled_this_epoch(bank) {
             return false;
         }
 
-        let start_slot = epoch_accounts_hash::calculation_start(bank);
+        let start_slot = epoch_accounts_hash_utils::calculation_start(bank);
         bank.slot() > self.last_accounts_hash_slot
             && bank.parent_slot() < start_slot
             && bank.slot() >= start_slot
@@ -676,11 +675,11 @@ mod tests {
         super::*,
         crate::{
             bank::test_utils::update_vote_account_timestamp,
-            epoch_accounts_hash::EpochAccountsHash,
             genesis_utils::{
                 create_genesis_config, create_genesis_config_with_leader, GenesisConfigInfo,
             },
         },
+        solana_accounts_db::epoch_accounts_hash::EpochAccountsHash,
         solana_sdk::{
             clock::UnixTimestamp,
             epoch_schedule::EpochSchedule,

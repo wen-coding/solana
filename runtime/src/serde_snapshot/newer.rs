@@ -5,11 +5,10 @@ use {
         *,
     },
     crate::{
-        accounts_hash::AccountsHash,
-        ancestors::AncestorsForSerialization,
         bank::EpochRewardStatus,
         stakes::{serde_stakes_enum_compat, StakesEnum},
     },
+    solana_accounts_db::{accounts_hash::AccountsHash, ancestors::AncestorsForSerialization},
     solana_measure::measure::Measure,
     solana_sdk::{deserialize_utils::ignore_eof_error, stake::state::Delegation},
     std::{cell::RefCell, collections::HashSet, sync::RwLock},
@@ -202,14 +201,16 @@ impl<'a> TypeContext<'a> for Context {
         let ancestors = HashMap::from(&serializable_bank.bank.ancestors);
         let fields = serializable_bank.bank.get_fields_to_serialize(&ancestors);
         let lamports_per_signature = fields.fee_rate_governor.lamports_per_signature;
-        let epoch_reward_status = None;
+        let epoch_reward_status = serializable_bank
+            .bank
+            .get_epoch_reward_status_to_serialize();
         match get_serialize_bank_fields(
             SerializableVersionedBank::from(fields),
             SerializableAccountsDb::<'a, Self> {
                 accounts_db: &serializable_bank.bank.rc.accounts.accounts_db,
                 slot: serializable_bank.bank.rc.slot,
                 account_storage_entries: serializable_bank.snapshot_storages,
-                phantom: std::marker::PhantomData::default(),
+                phantom: std::marker::PhantomData,
             },
             // Additional fields, we manually store the lamps per signature here so that
             // we can grab it on restart.
@@ -243,7 +244,7 @@ impl<'a> TypeContext<'a> for Context {
                 accounts_db: &serializable_bank.bank.rc.accounts.accounts_db,
                 slot: serializable_bank.bank.rc.slot,
                 account_storage_entries: serializable_bank.snapshot_storages,
-                phantom: std::marker::PhantomData::default(),
+                phantom: std::marker::PhantomData,
             },
         )
             .serialize(serializer)
@@ -343,8 +344,8 @@ impl<'a> TypeContext<'a> for Context {
         let epoch_accounts_hash = ignore_eof_error(deserialize_from(&mut stream))?;
         bank_fields.epoch_accounts_hash = epoch_accounts_hash;
 
-        let _epoch_reward_status: EpochRewardStatus =
-            ignore_eof_error(deserialize_from(&mut stream))?;
+        let epoch_reward_status = ignore_eof_error(deserialize_from(&mut stream))?;
+        bank_fields.epoch_reward_status = epoch_reward_status;
 
         Ok((bank_fields, accounts_db_fields))
     }

@@ -43,9 +43,7 @@ use {
     },
     solana_vote_program::{
         authorized_voters::AuthorizedVoters,
-        vote_state::{
-            BlockTimestamp, LandedVote, Lockout, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY,
-        },
+        vote_state::{BlockTimestamp, LandedVote, MAX_EPOCH_CREDITS_HISTORY, MAX_LOCKOUT_HISTORY},
     },
     std::{
         collections::{BTreeMap, HashMap},
@@ -59,7 +57,7 @@ static CHECK_MARK: Emoji = Emoji("✅ ", "");
 static CROSS_MARK: Emoji = Emoji("❌ ", "");
 static WARNING: Emoji = Emoji("⚠️", "!");
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Display,
     Json,
@@ -226,12 +224,8 @@ impl fmt::Display for CliBlockProduction {
             f,
             "{}",
             style(format!(
-                "  {:<44}  {:>15}  {:>15}  {:>15}  {:>23}",
-                "Identity",
-                "Leader Slots",
-                "Blocks Produced",
-                "Skipped Slots",
-                "Skipped Slot Percentage",
+                "  {:<44}  {:>15}  {:>15}  {:>15}  {:>15}",
+                "Identity", "Leader Slots", "Blocks Produced", "Skipped Slots", "Skip Rate",
             ))
             .bold()
         )?;
@@ -1051,7 +1045,7 @@ impl fmt::Display for CliKeyedEpochRewards {
 
 fn show_votes_and_credits(
     f: &mut fmt::Formatter,
-    votes: &[CliLockout],
+    votes: &[CliLandedVote],
     epoch_voting_history: &[CliEpochVotingHistory],
 ) -> fmt::Result {
     if votes.is_empty() {
@@ -1059,7 +1053,7 @@ fn show_votes_and_credits(
     }
 
     // Existence of this should guarantee the occurrence of vote truncation
-    let newest_history_entry = epoch_voting_history.iter().rev().next();
+    let newest_history_entry = epoch_voting_history.iter().next_back();
 
     writeln!(
         f,
@@ -1074,11 +1068,16 @@ fn show_votes_and_credits(
     )?;
 
     for vote in votes.iter().rev() {
-        writeln!(
+        write!(
             f,
             "- slot: {} (confirmation count: {})",
             vote.slot, vote.confirmation_count
         )?;
+        if vote.latency == 0 {
+            writeln!(f)?;
+        } else {
+            writeln!(f, " (latency {})", vote.latency)?;
+        }
     }
     if let Some(newest) = newest_history_entry {
         writeln!(
@@ -1559,7 +1558,7 @@ pub struct CliVoteAccount {
     pub commission: u8,
     pub root_slot: Option<Slot>,
     pub recent_timestamp: BlockTimestamp,
-    pub votes: Vec<CliLockout>,
+    pub votes: Vec<CliLandedVote>,
     pub epoch_voting_history: Vec<CliEpochVotingHistory>,
     #[serde(skip_serializing)]
     pub use_lamports_unit: bool,
@@ -1641,25 +1640,18 @@ pub struct CliEpochVotingHistory {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CliLockout {
+pub struct CliLandedVote {
+    pub latency: u8,
     pub slot: Slot,
     pub confirmation_count: u32,
 }
 
-impl From<&Lockout> for CliLockout {
-    fn from(lockout: &Lockout) -> Self {
+impl From<&LandedVote> for CliLandedVote {
+    fn from(landed_vote: &LandedVote) -> Self {
         Self {
-            slot: lockout.slot(),
-            confirmation_count: lockout.confirmation_count(),
-        }
-    }
-}
-
-impl From<&LandedVote> for CliLockout {
-    fn from(vote: &LandedVote) -> Self {
-        Self {
-            slot: vote.slot(),
-            confirmation_count: vote.confirmation_count(),
+            latency: landed_vote.latency,
+            slot: landed_vote.slot(),
+            confirmation_count: landed_vote.confirmation_count(),
         }
     }
 }
@@ -3056,7 +3048,7 @@ mod tests {
             }
 
             fn try_sign_message(&self, _message: &[u8]) -> Result<Signature, SignerError> {
-                Ok(Signature::new(&[1u8; 64]))
+                Ok(Signature::from([1u8; 64]))
             }
 
             fn is_interactive(&self) -> bool {

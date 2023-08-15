@@ -131,21 +131,17 @@ fn verify_packet(packet: &mut Packet, reject_non_vote: bool) -> bool {
 
     for _ in 0..packet_offsets.sig_len {
         let pubkey_end = pubkey_start.saturating_add(size_of::<Pubkey>());
-        let sig_end = match sig_start.checked_add(size_of::<Signature>()) {
-            Some(sig_end) => sig_end,
-            None => return false,
+        let Some(sig_end) = sig_start.checked_add(size_of::<Signature>()) else {
+            return false;
         };
-        let signature = match packet.data(sig_start..sig_end) {
-            Some(signature) => Signature::new(signature),
-            None => return false,
+        let Some(Ok(signature)) = packet.data(sig_start..sig_end).map(Signature::try_from) else {
+            return false;
         };
-        let pubkey = match packet.data(pubkey_start..pubkey_end) {
-            Some(pubkey) => pubkey,
-            None => return false,
+        let Some(pubkey) = packet.data(pubkey_start..pubkey_end) else {
+            return false;
         };
-        let message = match packet.data(msg_start..) {
-            Some(message) => message,
-            None => return false,
+        let Some(message) = packet.data(msg_start..) else {
+            return false;
         };
         if !signature.verify(pubkey, message) {
             return false;
@@ -317,9 +313,8 @@ fn do_get_packet_offsets(
 
 pub fn check_for_tracer_packet(packet: &mut Packet) -> bool {
     let first_pubkey_start: usize = TRACER_KEY_OFFSET_IN_TRANSACTION;
-    let first_pubkey_end = match first_pubkey_start.checked_add(size_of::<Pubkey>()) {
-        Some(offset) => offset,
-        None => return false,
+    let Some(first_pubkey_end) = first_pubkey_start.checked_add(size_of::<Pubkey>()) else {
+        return false;
     };
     // Check for tracer pubkey
     match packet.data(first_pubkey_start..first_pubkey_end) {
@@ -610,9 +605,8 @@ pub fn ed25519_verify(
     reject_non_vote: bool,
     valid_packet_count: usize,
 ) {
-    let api = match perf_libs::api() {
-        None => return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count),
-        Some(api) => api,
+    let Some(api) = perf_libs::api() else {
+        return ed25519_verify_cpu(batches, reject_non_vote, valid_packet_count);
     };
     let total_packet_count = count_packets_in_batches(batches);
     // micro-benchmarks show GPU time for smallest batch around 15-20ms
@@ -1408,6 +1402,21 @@ mod tests {
             let mut packet = Packet::from_data(None, tx).unwrap();
             let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
             check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0).ok();
+            assert!(!packet.meta().is_simple_vote_tx());
+        }
+
+        // single legacy vote tx with extra (invalid) signature is not
+        {
+            let mut tx = new_test_vote_tx(&mut rng);
+            tx.signatures.push(Signature::default());
+            tx.message.header.num_required_signatures = 3;
+            tx.message.instructions[0].data = vec![1, 2, 3];
+            let mut packet = Packet::from_data(None, tx).unwrap();
+            let packet_offsets = do_get_packet_offsets(&packet, 0).unwrap();
+            assert_eq!(
+                Err(PacketError::InvalidSignatureLen),
+                check_for_simple_vote_transaction(&mut packet, &packet_offsets, 0)
+            );
             assert!(!packet.meta().is_simple_vote_tx());
         }
     }

@@ -6,7 +6,7 @@ use {
     log::*,
     solana_connection_cache::{
         connection_cache::{
-            ConnectionCache, ConnectionManager, ConnectionPool, NewConnectionConfig, Protocol,
+            ConnectionCache, ConnectionManager, ConnectionPool, Protocol,
             DEFAULT_CONNECTION_POOL_SIZE,
         },
         nonblocking::client_connection::ClientConnection,
@@ -52,7 +52,7 @@ use {
 };
 
 #[cfg(feature = "spinner")]
-fn set_message_for_confirmed_transactions(
+pub fn set_message_for_confirmed_transactions(
     progress_bar: &ProgressBar,
     confirmed_transactions: u32,
     total_transactions: usize,
@@ -280,7 +280,6 @@ async fn send_wire_transaction_to_addr<P, M, C>(
 where
     P: ConnectionPool<NewConnectionConfig = C>,
     M: ConnectionManager<ConnectionPool = P, NewConnectionConfig = C>,
-    C: NewConnectionConfig,
 {
     let conn = connection_cache.get_nonblocking_connection(addr);
     conn.send_data(&wire_transaction).await
@@ -294,7 +293,6 @@ async fn send_wire_transaction_batch_to_addr<P, M, C>(
 where
     P: ConnectionPool<NewConnectionConfig = C>,
     M: ConnectionManager<ConnectionPool = P, NewConnectionConfig = C>,
-    C: NewConnectionConfig,
 {
     let conn = connection_cache.get_nonblocking_connection(addr);
     conn.send_data_batch(wire_transactions).await
@@ -304,7 +302,6 @@ impl<P, M, C> TpuClient<P, M, C>
 where
     P: ConnectionPool<NewConnectionConfig = C>,
     M: ConnectionManager<ConnectionPool = P, NewConnectionConfig = C>,
-    C: NewConnectionConfig,
 {
     /// Serialize and send transaction to the current and upcoming leader TPUs according to fanout
     /// size
@@ -417,13 +414,14 @@ where
 
     /// Create a new client that disconnects when dropped
     pub async fn new(
+        name: &'static str,
         rpc_client: Arc<RpcClient>,
         websocket_url: &str,
         config: TpuClientConfig,
         connection_manager: M,
     ) -> Result<Self> {
         let connection_cache = Arc::new(
-            ConnectionCache::new(connection_manager, DEFAULT_CONNECTION_POOL_SIZE).unwrap(),
+            ConnectionCache::new(name, connection_manager, DEFAULT_CONNECTION_POOL_SIZE).unwrap(),
         ); // TODO: Handle error properly, as the ConnectionCache ctor is now fallible.
         Self::new_with_connection_cache(rpc_client, websocket_url, config, connection_cache).await
     }
