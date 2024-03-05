@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -ex
 
-cd "$(dirname "$0")"/..
+cd "$(dirname "$0")"/../..
 eval "$(ci/channel-info.sh)"
 source ci/rust-version.sh
-source ci/docker/env.sh
 
 CHANNEL_OR_TAG=
 if [[ -n "$CI_TAG" ]]; then
@@ -21,21 +20,16 @@ fi
 
 cd "$(dirname "$0")"
 rm -rf usr/
-../ci/docker-run-default-image.sh scripts/cargo-install-all.sh docker-solana/usr
+../../ci/docker-run-default-image.sh scripts/cargo-install-all.sh sdk/docker-solana/usr
 
-cp -f ../scripts/run.sh usr/bin/solana-run.sh
-cp -f ../fetch-core-bpf.sh usr/bin/
-cp -f ../fetch-spl.sh usr/bin/
-cp -f ../fetch-programs.sh usr/bin/
+cp -f ../../scripts/run.sh usr/bin/solana-run.sh
+cp -f ../../fetch-spl.sh usr/bin/
 (
   cd usr/bin
-  ./fetch-core-bpf.sh
   ./fetch-spl.sh
 )
 
-docker build \
-  --build-arg "BASE_IMAGE=${CI_DOCKER_ARG_BASE_IMAGE}" \
-  -t anzaxyz/agave:"$CHANNEL_OR_TAG" .
+docker build -t solanalabs/solana:"$CHANNEL_OR_TAG" .
 
 maybeEcho=
 if [[ -z $CI ]]; then
@@ -49,4 +43,4 @@ else
     fi
   )
 fi
-$maybeEcho docker push anzaxyz/agave:"$CHANNEL_OR_TAG"
+$maybeEcho docker push solanalabs/solana:"$CHANNEL_OR_TAG"
