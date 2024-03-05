@@ -1,12 +1,18 @@
-name: Publish Windows Tarball
+name: release-artifacts
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       commit:
+        required: false
         type: string
+    secrets:
+      AWS_ACCESS_KEY_ID:
         required: true
-        description: commit
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AWS_S3_BUCKET:
+        required: true
 
 jobs:
   windows-build:
@@ -16,44 +22,39 @@ jobs:
       channel: ${{ steps.build.outputs.channel }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           ref: master
           fetch-depth: 0
 
-      # took the workaround from https://github.com/sfackler/rust-openssl/issues/2149
-      - name: Set Perl environment variables
+      - name: Setup Rust
+        shell: bash
         run: |
-          echo "PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          echo "OPENSSL_SRC_PERL=$((where.exe perl)[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          source ci/rust-version.sh stable
+
+      # copy the newest version env.sh before switching version.
+      - name: Copy Env Script
+        shell: bash
+        run: |
+          cp -r ci/env.sh /tmp/env.sh
+
+      - name: Switch Version
+        if: ${{ inputs.commit }}
+        run: |
+          git checkout ${{ inputs.commit }}
 
       - name: Build
         id: build
         shell: bash
-        env:
-          COMMIT: ${{ github.event.inputs.commit }}
         run: |
-          # install all deps
-          source .github/scripts/install-all-deps.sh ${{ runner.os }}
-
-          # checkout the commit
-          if [[ -z ${{ env.COMMIT }} ]]; then
-            echo "Required parameter env.COMMIT is empty."
-            exit 1
-          fi
-
-          git checkout ${{ env.COMMIT }}
-
-          source ci/env.sh
+          vcpkg install openssl:x64-windows-static-md
+          vcpkg integrate install
+          choco install protoc
+          export PROTOC="C:\ProgramData\chocolatey\lib\protoc\tools\bin\protoc.exe"
+          source /tmp/env.sh
           echo "tag=$CI_TAG" >> $GITHUB_OUTPUT
           eval "$(ci/channel-info.sh)"
           echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
-
-          # print the info
-          echo "::notice::commit: ${{ env.COMMIT }}"
-          echo "::notice::tag: $CI_TAG"
-          echo "::notice::channel: $CHANNEL"
-
           ci/publish-tarball.sh
 
       - name: Prepare Upload Files
@@ -61,37 +62,28 @@ jobs:
         shell: bash
         run: |
           FOLDER_NAME=${{ steps.build.outputs.tag || steps.build.outputs.channel }}
-          mkdir -p "windows-release/$FOLDER_NAME"
-          cp -v "solana-release-x86_64-pc-windows-msvc.tar.bz2" "windows-release/$FOLDER_NAME/"
-          cp -v "solana-release-x86_64-pc-windows-msvc.yml" "windows-release/$FOLDER_NAME/"
-          cp -v "solana-install-init-x86_64-pc-windows-msvc"* "windows-release/$FOLDER_NAME"
+          mkdir -p "github-action-s3-upload/$FOLDER_NAME"
+          cp -v "solana-release-x86_64-pc-windows-msvc.tar.bz2" "github-action-s3-upload/$FOLDER_NAME/"
+          cp -v "solana-release-x86_64-pc-windows-msvc.yml" "github-action-s3-upload/$FOLDER_NAME/"
+          cp -v "solana-install-init-x86_64-pc-windows-msvc"* "github-action-s3-upload/$FOLDER_NAME"
 
       - name: Upload Artifacts
         if: ${{ steps.build.outputs.channel != '' || steps.build.outputs.tag != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: windows-artifact
-          path: windows-release/
+          path: github-action-s3-upload/
 
   windows-s3-upload:
     if: ${{ needs.windows-build.outputs.channel != '' || needs.windows-build.outputs.tag != '' }}
     needs: [windows-build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     steps:
       - name: Download
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           name: windows-artifact
-          path: .windows-release/
-
-      - name: Setup crediential
-        uses: "google-github-actions/auth@v2"
-        with:
-          credentials_json: "${{ secrets.GCS_RELEASE_BUCKET_WRITER_CREDIENTIAL }}"
-
-      - name: Upload files to GCS
-        run: |
-          gcloud storage cp --recursive windows-release/* gs://anza-release/
+          path: ./github-action-s3-upload
 
       - name: Upload
         uses: jakejarvis/s3-sync-action@master
@@ -102,22 +94,23 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
           AWS_REGION: "us-west-1"
-          SOURCE_DIR: "windows-release"
+          SOURCE_DIR: "github-action-s3-upload"
 
   windows-gh-release:
     if: ${{ needs.windows-build.outputs.tag != '' }}
     needs: [windows-build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
     steps:
       - name: Download
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v3
         with:
           name: windows-artifact
-          path: ./windows-release/
+          path: ./github-action-s3-upload
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.windows-build.outputs.tag }}
+          draft: true
           files: |
-            windows-release/${{ needs.windows-build.outputs.tag }}/*
+            github-action-s3-upload/${{ needs.windows-build.outputs.tag }}/*
