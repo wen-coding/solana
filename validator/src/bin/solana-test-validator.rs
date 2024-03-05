@@ -1,38 +1,39 @@
 use {
-    agave_validator::{
-        admin_rpc_service, cli, dashboard::Dashboard, ledger_lockfile, lock_ledger,
-        println_name_value,
-    },
     clap::{crate_name, value_t, value_t_or_exit, values_t_or_exit},
     crossbeam_channel::unbounded,
     itertools::Itertools,
     log::*,
-    solana_account::AccountSharedData,
     solana_accounts_db::accounts_index::{AccountIndex, AccountSecondaryIndexes},
     solana_clap_utils::{
         input_parsers::{pubkey_of, pubkeys_of, value_of},
         input_validators::normalize_to_url_if_moniker,
     },
-    solana_clock::Slot,
     solana_core::consensus::tower_storage::FileTowerStorage,
-    solana_epoch_schedule::EpochSchedule,
     solana_faucet::faucet::run_local_faucet_with_port,
-    solana_keypair::{read_keypair_file, write_keypair_file, Keypair},
-    solana_logger::redirect_stderr_to_file,
-    solana_native_token::sol_to_lamports,
-    solana_pubkey::Pubkey,
-    solana_rent::Rent,
     solana_rpc::{
         rpc::{JsonRpcConfig, RpcBigtableConfig},
         rpc_pubsub_service::PubSubConfig,
     },
     solana_rpc_client::rpc_client::RpcClient,
-    solana_signer::Signer,
+    solana_sdk::{
+        account::AccountSharedData,
+        clock::Slot,
+        epoch_schedule::EpochSchedule,
+        feature_set,
+        native_token::sol_to_lamports,
+        pubkey::Pubkey,
+        rent::Rent,
+        signature::{read_keypair_file, write_keypair_file, Keypair, Signer},
+        system_program,
+    },
     solana_streamer::socket::SocketAddrSpace,
-    solana_system_interface::program as system_program,
     solana_test_validator::*,
+    solana_validator::{
+        admin_rpc_service, cli, dashboard::Dashboard, ledger_lockfile, lock_ledger,
+        println_name_value, redirect_stderr_to_file,
+    },
     std::{
-        collections::{HashMap, HashSet},
+        collections::HashSet,
         fs, io,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
@@ -171,14 +172,11 @@ fn main() {
             exit(1);
         })
     });
-    let bind_address = solana_net_utils::parse_host(
-        matches
-            .value_of("bind_address")
-            .expect("Bind address has default value"),
-    )
-    .unwrap_or_else(|err| {
-        eprintln!("Failed to parse --bind-address: {err}");
-        exit(1);
+    let bind_address = matches.value_of("bind_address").map(|bind_address| {
+        solana_net_utils::parse_host(bind_address).unwrap_or_else(|err| {
+            eprintln!("Failed to parse --bind-address: {err}");
+            exit(1);
+        })
     });
     let compute_unit_limit = value_t!(matches, "compute_unit_limit", u64).ok();
 
@@ -214,7 +212,7 @@ fn main() {
 
             upgradeable_programs_to_load.push(UpgradeableProgramInfo {
                 program_id: address,
-                loader: solana_sdk_ids::bpf_loader_upgradeable::id(),
+                loader: solana_sdk::bpf_loader_upgradeable::id(),
                 upgrade_authority: Pubkey::default(),
                 program_path,
             });
@@ -243,7 +241,7 @@ fn main() {
 
             upgradeable_programs_to_load.push(UpgradeableProgramInfo {
                 program_id: address,
-                loader: solana_sdk_ids::bpf_loader_upgradeable::id(),
+                loader: solana_sdk::bpf_loader_upgradeable::id(),
                 upgrade_authority: upgrade_authority_address,
                 program_path,
             });
@@ -283,8 +281,6 @@ fn main() {
         pubkeys_of(&matches, "clone_upgradeable_program")
             .map(|v| v.into_iter().collect())
             .unwrap_or_default();
-
-    let clone_feature_set = matches.is_present("clone_feature_set");
 
     let warp_slot = if matches.is_present("warp_slot") {
         Some(match matches.value_of("warp_slot") {
@@ -356,7 +352,9 @@ fn main() {
         exit(1);
     });
 
-    let features_to_deactivate = pubkeys_of(&matches, "deactivate_feature").unwrap_or_default();
+    let mut features_to_deactivate = pubkeys_of(&matches, "deactivate_feature").unwrap_or_default();
+    // Remove this when client support is ready for the enable_partitioned_epoch_reward feature
+    features_to_deactivate.push(feature_set::enable_partitioned_epoch_reward::id());
 
     if TestValidatorGenesis::ledger_exists(&ledger_path) {
         for (name, long) in &[
@@ -405,7 +403,6 @@ fn main() {
             start_progress: genesis.start_progress.clone(),
             start_time: std::time::SystemTime::now(),
             validator_exit: genesis.validator_exit.clone(),
-            validator_exit_backpressure: HashMap::default(),
             authorized_voter_keypairs: genesis.authorized_voter_keypairs.clone(),
             staked_nodes_overrides: genesis.staked_nodes_overrides.clone(),
             post_init: admin_service_post_init,
@@ -414,20 +411,21 @@ fn main() {
         },
     );
     let dashboard = if output == Output::Dashboard {
-        Some(Dashboard::new(
-            &ledger_path,
-            Some(&validator_log_symlink),
-            Some(&mut genesis.validator_exit.write().unwrap()),
-        ))
+        Some(
+            Dashboard::new(
+                &ledger_path,
+                Some(&validator_log_symlink),
+                Some(&mut genesis.validator_exit.write().unwrap()),
+            )
+            .unwrap(),
+        )
     } else {
         None
     };
 
-    let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage")
-        || matches.is_present("enable_bigtable_ledger_upload")
-    {
+    let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage") {
         Some(RpcBigtableConfig {
-            enable_bigtable_ledger_upload: matches.is_present("enable_bigtable_ledger_upload"),
+            enable_bigtable_ledger_upload: false,
             bigtable_instance_name: value_t_or_exit!(matches, "rpc_bigtable_instance", String),
             bigtable_app_profile_id: value_t_or_exit!(
                 matches,
@@ -481,7 +479,7 @@ fn main() {
             accounts_to_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("--clone-account requires --json-rpc-url argument"),
+                .expect("bug: --url argument missing?"),
             false,
         ) {
             println!("Error: clone_accounts failed: {e}");
@@ -494,7 +492,7 @@ fn main() {
             accounts_to_maybe_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("--maybe-clone requires --json-rpc-url argument"),
+                .expect("bug: --url argument missing?"),
             true,
         ) {
             println!("Error: clone_accounts failed: {e}");
@@ -507,20 +505,9 @@ fn main() {
             upgradeable_programs_to_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("--clone-upgradeable-program requires --json-rpc-url argument"),
+                .expect("bug: --url argument missing?"),
         ) {
             println!("Error: clone_upgradeable_programs failed: {e}");
-            exit(1);
-        }
-    }
-
-    if clone_feature_set {
-        if let Err(e) = genesis.clone_feature_set(
-            cluster_rpc_client
-                .as_ref()
-                .expect("--clone-feature-set requires --json-rpc-url argument"),
-        ) {
-            println!("Error: clone_feature_set failed: {e}");
             exit(1);
         }
     }
@@ -555,7 +542,9 @@ fn main() {
         genesis.port_range(dynamic_port_range);
     }
 
-    genesis.bind_ip_addr(bind_address);
+    if let Some(bind_address) = bind_address {
+        genesis.bind_ip_addr(bind_address);
+    }
 
     if matches.is_present("geyser_plugin_config") {
         genesis.geyser_plugin_config_files = Some(

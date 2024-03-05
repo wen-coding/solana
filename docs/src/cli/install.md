@@ -8,37 +8,37 @@ sidebar_position: 1
 There are multiple ways to install the Solana tools on your computer depending
 on your preferred workflow:
 
-- [Use the Solana Install Tool (Simplest option)](#use-solanas-install-tool)
+- [Use Solana's Install Tool (Simplest option)](#use-solanas-install-tool)
 - [Download Prebuilt Binaries](#download-prebuilt-binaries)
 - [Build from Source](#build-from-source)
 - [Use Homebrew](#use-homebrew)
 
-## Use The Solana Install Tool
+## Use Solana's Install Tool
 
 ### MacOS & Linux
 
 - Open your favorite Terminal application
 
-- Install the Agave release
-  [LATEST_AGAVE_RELEASE_VERSION](https://github.com/anza-xyz/agave/releases/tag/LATEST_AGAVE_RELEASE_VERSION)
+- Install the Solana release
+  [LATEST_SOLANA_RELEASE_VERSION](https://github.com/solana-labs/solana/releases/tag/LATEST_SOLANA_RELEASE_VERSION)
   on your machine by running:
 
 ```bash
-sh -c "$(curl -sSfL https://release.anza.xyz/LATEST_AGAVE_RELEASE_VERSION/install)"
+sh -c "$(curl -sSfL https://release.solana.com/LATEST_SOLANA_RELEASE_VERSION/install)"
 ```
 
-- You can replace `LATEST_AGAVE_RELEASE_VERSION` with the release tag matching
+- You can replace `LATEST_SOLANA_RELEASE_VERSION` with the release tag matching
   the software version of your desired release, or use one of the three symbolic
   channel names: `stable`, `beta`, or `edge`.
 
 - The following output indicates a successful update:
 
 ```text
-downloading LATEST_AGAVE_RELEASE_VERSION installer
+downloading LATEST_SOLANA_RELEASE_VERSION installer
 Configuration: /home/solana/.config/solana/install/config.yml
 Active release directory: /home/solana/.local/share/solana/install/active_release
-* Release version: LATEST_AGAVE_RELEASE_VERSION
-* Release URL: https://github.com/anza-xyz/agave/releases/download/LATEST_AGAVE_RELEASE_VERSION/solana-release-x86_64-unknown-linux-gnu.tar.bz2
+* Release version: LATEST_SOLANA_RELEASE_VERSION
+* Release URL: https://github.com/solana-labs/solana/releases/download/LATEST_SOLANA_RELEASE_VERSION/solana-release-x86_64-unknown-linux-gnu.tar.bz2
 Update successful
 ```
 
@@ -56,7 +56,7 @@ Please update your PATH environment variable to include the solana programs:
 solana --version
 ```
 
-- After a successful install, `agave-install update` may be used to easily
+- After a successful install, `solana-install update` may be used to easily
   update the Solana software to a newer version at any time.
 
 ---
@@ -74,7 +74,7 @@ solana --version
   installer into a temporary directory:
 
 ```bash
-cmd /c "curl https://release.anza.xyz/LATEST_AGAVE_RELEASE_VERSION/agave-install-init-x86_64-pc-windows-msvc.exe --output C:\agave-install-tmp\agave-install-init.exe --create-dirs"
+cmd /c "curl https://release.solana.com/LATEST_SOLANA_RELEASE_VERSION/solana-install-init-x86_64-pc-windows-msvc.exe --output C:\solana-install-tmp\solana-install-init.exe --create-dirs"
 ```
 
 - Copy and paste the following command, then press Enter to install the latest
@@ -82,7 +82,7 @@ cmd /c "curl https://release.anza.xyz/LATEST_AGAVE_RELEASE_VERSION/agave-install
   to allow the program to run.
 
 ```bash
-C:\agave-install-tmp\agave-install-init.exe LATEST_AGAVE_RELEASE_VERSION
+C:\solana-install-tmp\solana-install-init.exe LATEST_SOLANA_RELEASE_VERSION
 ```
 
 - When the installer is finished, press Enter.
@@ -97,18 +97,18 @@ C:\agave-install-tmp\agave-install-init.exe LATEST_AGAVE_RELEASE_VERSION
 solana --version
 ```
 
-- After a successful install, `agave-install update` may be used to easily
+- After a successful install, `solana-install update` may be used to easily
   update the Solana software to a newer version at any time.
 
 ## Download Prebuilt Binaries
 
-If you would rather not use `agave-install` to manage the install, you can
+If you would rather not use `solana-install` to manage the install, you can
 manually download and install the binaries.
 
 ### Linux
 
 Download the binaries by navigating to
-[https://github.com/anza-xyz/agave/releases/latest](https://github.com/anza-xyz/agave/releases/latest),
+[https://github.com/solana-labs/solana/releases/latest](https://github.com/solana-labs/solana/releases/latest),
 download **solana-release-x86_64-unknown-linux-gnu.tar.bz2**, then extract the
 archive:
 
@@ -121,7 +121,7 @@ export PATH=$PWD/bin:$PATH
 ### MacOS
 
 Download the binaries by navigating to
-[https://github.com/anza-xyz/agave/releases/latest](https://github.com/anza-xyz/agave/releases/latest),
+[https://github.com/solana-labs/solana/releases/latest](https://github.com/solana-labs/solana/releases/latest),
 download **solana-release-x86_64-apple-darwin.tar.bz2**, then extract the
 archive:
 
@@ -134,7 +134,7 @@ export PATH=$PWD/bin:$PATH
 ### Windows
 
 - Download the binaries by navigating to
-  [https://github.com/anza-xyz/agave/releases/latest](https://github.com/anza-xyz/agave/releases/latest),
+  [https://github.com/solana-labs/solana/releases/latest](https://github.com/solana-labs/solana/releases/latest),
   download **solana-release-x86_64-pc-windows-msvc.tar.bz2**, then extract the
   archive using WinZip or similar.
 
@@ -156,13 +156,15 @@ installed on your system.
 
 Before building from source, make sure to install the following prerequisites:
 
-#### Rust
-
-For all platforms, check "Install Rust" at
-[https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
-for the latest installation instructions.
-
 #### For Debian and Other Linux Distributions:
+
+Rust Programming Language: Check "Install Rust" at
+[https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install),
+which recommends the following command.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 Install build dependencies:
 
@@ -186,19 +188,31 @@ Replace `apt` with your distribution's package manager (e.g., `yum`, `dnf`,
 
 #### For macOS:
 
-Check "Install Homebrew" at [https://brew.sh/](https://brew.sh/) for the latest
-installation instruction for Homebrew if not already installed.
-
-Then, install build dependencies with `brew`:
+Install Homebrew (if not already installed), check "Install Hombrew" at
+[https://brew.sh/](https://brew.sh/), which recommends the following command:
 
 ```bash
-brew install pkg-config libudev protobuf llvm coreutils
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Install the necessary tools and libraries using Homebrew:
+
+```bash
+brew install rust pkg-config libudev protobuf llvm coreutils
 ```
 
 Follow the instructions given at the end of the brew install command about
 `PATH` configurations.
 
 #### For Windows:
+
+Rust Programming Language: Check "Install Rust" at
+[https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install),
+which recommends the following command.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 - Download and install the Build Tools for Visual Studio (2019 or later) from
   the
@@ -228,7 +242,7 @@ above.
 
 After installing the prerequisites, proceed with building Solana from source,
 navigate to
-[Solana's GitHub releases page](https://github.com/anza-xyz/agave/releases/latest),
+[Solana's GitHub releases page](https://github.com/solana-labs/solana/releases/latest),
 and download the **Source Code** archive. Extract the code and build the
 binaries with:
 
@@ -241,7 +255,7 @@ You can then run the following command to obtain the same result as with
 prebuilt binaries:
 
 ```bash
-agave-install init
+solana-install init
 ```
 
 ## Use Homebrew

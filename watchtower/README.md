@@ -1,18 +1,17 @@
-The `agave-watchtower` program is used to monitor the health of a cluster. It
+The `solana-watchtower` program is used to monitor the health of a cluster.  It
 periodically polls the cluster over an RPC API to confirm that the transaction
 count is advancing, new blockhashes are available, and no validators are
-delinquent. Results are reported as InfluxDB metrics, with an optional push
+delinquent.  Results are reported as InfluxDB metrics, with an optional push
 notification on sanity failure.
 
-If you only care about the health of several specific validators, the
+If you only care about the health of one specific validator, the
 `--validator-identity` command-line argument can be used to restrict failure
-notifications to issues only affecting that set of validators.
+notifications to issues only affecting that validator.
 
-User can provide either 1 or 3 RPC URLs for the cluster via the `--url` or `--urls`
-command-line arguments respectively. 2 URLs are not accepted because it's not enough
-to have redundnacy, and more than 3 URLs are not accepted because there's little
-benefit from having more than 3. If 3 URLs are provided, at least 2 of them have to
-confirm health of a cluster.
+If you do not want duplicate notifications, for example if you have elected to
+receive notifications by SMS the
+`--no-duplicate-notifications` command-line argument will suppress identical
+failure notifications.
 
 ### Metrics
 #### `watchtower-sanity`
