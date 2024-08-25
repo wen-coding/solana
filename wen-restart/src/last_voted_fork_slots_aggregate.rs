@@ -10,7 +10,7 @@ use {
         pubkey::Pubkey,
     },
     std::{
-        collections::{BTreeSet, HashMap, HashSet},
+        collections::{BTreeSet, HashMap},
         str::FromStr,
         sync::Arc,
     },
@@ -33,8 +33,6 @@ pub(crate) struct LastVotedForkSlotsEpochInfo {
 }
 
 pub(crate) struct LastVotedForkSlotsAggregate {
-    // Map each peer pubkey to the epoch of its last vote.
-    node_to_last_vote_epoch_map: HashMap<Pubkey, Epoch>,
     epoch_info_vec: Vec<LastVotedForkSlotsEpochInfo>,
     last_voted_fork_slots: HashMap<Pubkey, RestartLastVotedForkSlots>,
     my_pubkey: Pubkey,
@@ -48,6 +46,14 @@ pub(crate) struct LastVotedForkSlotsAggregate {
 pub struct LastVotedForkSlotsFinalResult {
     pub slots_stake_map: HashMap<Slot, u64>,
     pub epoch_info_vec: Vec<LastVotedForkSlotsEpochInfo>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum LastVotedForkSlotsAggregateResult {
+    AlreadyExists,
+    DifferentVersionExists(RestartLastVotedForkSlots, RestartLastVotedForkSlots),
+    Inserted(LastVotedForkSlotsRecord),
+    Malformed,
 }
 
 impl LastVotedForkSlotsAggregate {
@@ -79,8 +85,6 @@ impl LastVotedForkSlotsAggregate {
                     .expect("my voted slots should not be empty"),
             )
             .0;
-        let mut node_to_last_vote_epoch_map = HashMap::new();
-        node_to_last_vote_epoch_map.insert(*my_pubkey, my_last_vote_epoch);
         // We would only consider slots in root_epoch and the next epoch.
         let epoch_info_vec: Vec<LastVotedForkSlotsEpochInfo> = (root_epoch
             ..root_epoch
@@ -107,7 +111,6 @@ impl LastVotedForkSlotsAggregate {
             })
             .collect();
         Self {
-            node_to_last_vote_epoch_map,
             epoch_info_vec,
             last_voted_fork_slots: HashMap::new(),
             my_pubkey: *my_pubkey,
@@ -122,11 +125,8 @@ impl LastVotedForkSlotsAggregate {
         &mut self,
         key_string: &str,
         record: &LastVotedForkSlotsRecord,
-    ) -> Result<Option<LastVotedForkSlotsRecord>> {
+    ) -> Result<LastVotedForkSlotsAggregateResult> {
         let from = Pubkey::from_str(key_string)?;
-        if from == self.my_pubkey {
-            return Ok(None);
-        }
         let last_voted_hash = Hash::from_str(&record.last_vote_bankhash)?;
         let converted_record = RestartLastVotedForkSlots::new(
             from,
@@ -141,31 +141,36 @@ impl LastVotedForkSlotsAggregate {
     pub(crate) fn aggregate(
         &mut self,
         new_slots: RestartLastVotedForkSlots,
-    ) -> Option<LastVotedForkSlotsRecord> {
+    ) -> LastVotedForkSlotsAggregateResult {
         let from = &new_slots.from;
         if from == &self.my_pubkey {
-            return None;
+            return LastVotedForkSlotsAggregateResult::AlreadyExists;
         }
         let root_slot = self.root_bank.slot();
         let new_slots_vec = new_slots.to_slots(root_slot);
         if new_slots_vec.is_empty() {
-            return None;
+            // We don't want to exit wen_restart because we got malformed message.
+            warn!("The slots from {from} is empty");
+            return LastVotedForkSlotsAggregateResult::Malformed;
         }
+        if let Some(old_slots) = self.last_voted_fork_slots.get(from) {
+            if old_slots.to_slots(self.root_bank.slot()) == new_slots_vec {
+                return LastVotedForkSlotsAggregateResult::AlreadyExists;
+            } else {
+                return LastVotedForkSlotsAggregateResult::DifferentVersionExists(
+                    old_slots.clone(),
+                    new_slots.clone(),
+                );
+            }
+        }
+        self.last_voted_fork_slots.insert(*from, new_slots.clone());
         let last_vote_epoch = self
             .root_bank
             .get_epoch_and_slot_index(*new_slots_vec.last().unwrap())
             .0;
-        let old_last_vote_epoch = self
-            .node_to_last_vote_epoch_map
-            .insert(*from, last_vote_epoch);
-        if old_last_vote_epoch != Some(last_vote_epoch) {
-            self.update_epoch_info(from, last_vote_epoch, old_last_vote_epoch);
-        }
-        if self.update_and_check_if_message_already_saved(new_slots.clone(), new_slots_vec.clone())
-        {
-            return None;
-        }
-        Some(LastVotedForkSlotsRecord {
+        self.update_epoch_info(from, last_vote_epoch);
+        self.insert_message(from, &new_slots_vec);
+        LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
             last_voted_fork_slots: new_slots_vec,
             last_vote_bankhash: new_slots.last_voted_hash.to_string(),
             shred_version: new_slots.shred_version as u32,
@@ -173,38 +178,8 @@ impl LastVotedForkSlotsAggregate {
         })
     }
 
-    // Return true if the message has already been saved, so we can skip the rest of the processing.
-    fn update_and_check_if_message_already_saved(
-        &mut self,
-        new_slots: RestartLastVotedForkSlots,
-        new_slots_vec: Vec<Slot>,
-    ) -> bool {
-        let from = &new_slots.from;
-        let new_slots_set: HashSet<Slot> = HashSet::from_iter(new_slots_vec);
-        let old_slots_set = match self.last_voted_fork_slots.insert(*from, new_slots.clone()) {
-            Some(old_slots) => {
-                if old_slots == new_slots {
-                    return true;
-                } else {
-                    HashSet::from_iter(old_slots.to_slots(self.root_bank.slot()))
-                }
-            }
-            None => HashSet::new(),
-        };
-        for slot in old_slots_set.difference(&new_slots_set) {
-            let epoch = self.root_bank.epoch_schedule().get_epoch(*slot);
-            let entry = self.slots_stake_map.get_mut(slot).unwrap();
-            if let Some(sender_stake) = self.root_bank.epoch_node_id_to_stake(epoch, from) {
-                *entry = entry.saturating_sub(sender_stake);
-                let repair_threshold_stake = (self.root_bank.epoch_total_stake(epoch).unwrap()
-                    as f64
-                    * self.repair_threshold) as u64;
-                if *entry < repair_threshold_stake {
-                    self.slots_to_repair.remove(slot);
-                }
-            }
-        }
-        for slot in new_slots_set.difference(&old_slots_set) {
+    fn insert_message(&mut self, from: &Pubkey, new_slots_vec: &Vec<Slot>) {
+        for slot in new_slots_vec {
             let epoch = self.root_bank.epoch_schedule().get_epoch(*slot);
             let entry = self.slots_stake_map.entry(*slot).or_insert(0);
             if let Some(sender_stake) = self.root_bank.epoch_node_id_to_stake(epoch, from) {
@@ -217,37 +192,18 @@ impl LastVotedForkSlotsAggregate {
                 }
             }
         }
-        false
     }
 
-    fn update_epoch_info(
-        &mut self,
-        from: &Pubkey,
-        last_vote_epoch: Epoch,
-        old_last_vote_epoch: Option<Epoch>,
-    ) {
-        if Some(last_vote_epoch) < old_last_vote_epoch {
-            // We only have two entries so old epoch must be the second one.
-            let entry = self.epoch_info_vec.last_mut().unwrap();
+    fn update_epoch_info(&mut self, from: &Pubkey, last_vote_epoch: Epoch) {
+        for entry in self.epoch_info_vec.iter_mut() {
             if let Some(stake) = self.root_bank.epoch_node_id_to_stake(entry.epoch, from) {
-                entry.actively_voting_for_this_epoch_stake = entry
-                    .actively_voting_for_this_epoch_stake
-                    .checked_sub(stake)
-                    .unwrap();
-            }
-        } else {
-            for entry in self.epoch_info_vec.iter_mut() {
-                if let Some(stake) = self.root_bank.epoch_node_id_to_stake(entry.epoch, from) {
-                    if old_last_vote_epoch.is_none() {
-                        entry.actively_voting_stake =
-                            entry.actively_voting_stake.checked_add(stake).unwrap();
-                    }
-                    if Some(entry.epoch) > old_last_vote_epoch && entry.epoch <= last_vote_epoch {
-                        entry.actively_voting_for_this_epoch_stake = entry
-                            .actively_voting_for_this_epoch_stake
-                            .checked_add(stake)
-                            .unwrap();
-                    }
+                entry.actively_voting_stake =
+                    entry.actively_voting_stake.checked_add(stake).unwrap();
+                if entry.epoch <= last_vote_epoch {
+                    entry.actively_voting_for_this_epoch_stake = entry
+                        .actively_voting_for_this_epoch_stake
+                        .checked_add(stake)
+                        .unwrap();
                 }
             }
         }
@@ -341,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate() {
+    fn test_aggregate_success() {
         let mut test_state = test_aggregate_init();
         let root_slot = test_state.root_slot;
         // Until 33% stake vote, the percentage should be 0.
@@ -365,7 +321,7 @@ mod tests {
                     )
                     .unwrap(),
                 ),
-                Some(LastVotedForkSlotsRecord {
+                LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
                     last_voted_fork_slots: test_state.last_voted_fork_slots.clone(),
                     last_vote_bankhash: Hash::default().to_string(),
                     shred_version: SHRED_VERSION as u32,
@@ -386,10 +342,10 @@ mod tests {
             [initial_num_active_validators]
             .node_keypair
             .pubkey();
-        let now = timestamp();
+        let timestamp1 = timestamp();
         let new_active_validator_last_voted_slots = RestartLastVotedForkSlots::new(
             new_active_validator,
-            now,
+            timestamp1,
             &test_state.last_voted_fork_slots,
             Hash::default(),
             SHRED_VERSION,
@@ -399,11 +355,11 @@ mod tests {
             test_state
                 .slots_aggregate
                 .aggregate(new_active_validator_last_voted_slots),
-            Some(LastVotedForkSlotsRecord {
+            LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
                 last_voted_fork_slots: test_state.last_voted_fork_slots.clone(),
                 last_vote_bankhash: Hash::default().to_string(),
                 shred_version: SHRED_VERSION as u32,
-                wallclock: now,
+                wallclock: timestamp1,
             }),
         );
         let expected_active_percent =
@@ -436,7 +392,7 @@ mod tests {
             test_state
                 .slots_aggregate
                 .aggregate(new_active_validator_last_voted_slots),
-            Some(LastVotedForkSlotsRecord {
+            LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
                 last_voted_fork_slots: test_state.last_voted_fork_slots.clone(),
                 last_vote_bankhash: Hash::default().to_string(),
                 shred_version: SHRED_VERSION as u32,
@@ -458,7 +414,7 @@ mod tests {
             [initial_num_active_validators]
             .node_keypair
             .pubkey();
-        // Allow specific validator to replace message.
+        // Do not allow validator to replace message.
         let now = timestamp();
         let replace_message_validator_last_fork = RestartLastVotedForkSlots::new(
             replace_message_validator,
@@ -471,13 +427,18 @@ mod tests {
         assert_eq!(
             test_state
                 .slots_aggregate
-                .aggregate(replace_message_validator_last_fork),
-            Some(LastVotedForkSlotsRecord {
-                last_voted_fork_slots: vec![root_slot + 1, root_slot + 4, root_slot + 5],
-                last_vote_bankhash: Hash::default().to_string(),
-                shred_version: SHRED_VERSION as u32,
-                wallclock: now,
-            }),
+                .aggregate(replace_message_validator_last_fork.clone()),
+            LastVotedForkSlotsAggregateResult::DifferentVersionExists(
+                RestartLastVotedForkSlots::new(
+                    replace_message_validator,
+                    timestamp1,
+                    &test_state.last_voted_fork_slots,
+                    Hash::default(),
+                    SHRED_VERSION
+                )
+                .unwrap(),
+                replace_message_validator_last_fork
+            ),
         );
         assert_eq!(
             test_state.slots_aggregate.min_active_percent(),
@@ -486,7 +447,10 @@ mod tests {
         let mut actual_slots =
             Vec::from_iter(test_state.slots_aggregate.slots_to_repair_iter().cloned());
         actual_slots.sort();
-        assert_eq!(actual_slots, vec![root_slot + 1]);
+        assert_eq!(
+            actual_slots,
+            vec![root_slot + 1, root_slot + 2, root_slot + 3]
+        );
 
         // test that message from my pubkey is ignored.
         assert_eq!(
@@ -502,7 +466,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            None,
+            LastVotedForkSlotsAggregateResult::AlreadyExists,
         );
 
         assert_eq!(
@@ -510,10 +474,8 @@ mod tests {
             LastVotedForkSlotsFinalResult {
                 slots_stake_map: vec![
                     (root_slot + 1, 500),
-                    (root_slot + 2, 400),
-                    (root_slot + 3, 400),
-                    (root_slot + 4, 100),
-                    (root_slot + 5, 100),
+                    (root_slot + 2, 500),
+                    (root_slot + 3, 500),
                 ]
                 .into_iter()
                 .collect(),
@@ -536,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_from_record() {
+    fn test_aggregate_from_record_success() {
         let mut test_state = test_aggregate_init();
         let root_slot = test_state.root_slot;
         let last_vote_bankhash = Hash::new_unique();
@@ -559,7 +521,7 @@ mod tests {
                     &record,
                 )
                 .unwrap(),
-            Some(record.clone()),
+            LastVotedForkSlotsAggregateResult::Inserted(record.clone()),
         );
         // Before 33% voted for slot in this epoch, the percentage should be 0.
         assert_eq!(test_state.slots_aggregate.min_active_percent(), 0.0);
@@ -579,7 +541,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 test_state.slots_aggregate.aggregate(last_voted_fork_slots),
-                Some(LastVotedForkSlotsRecord {
+                LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
                     wallclock: now,
                     last_voted_fork_slots: test_state.last_voted_fork_slots.clone(),
                     last_vote_bankhash: last_vote_bankhash.to_string(),
@@ -602,33 +564,41 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            None,
+            LastVotedForkSlotsAggregateResult::AlreadyExists,
         );
 
-        // But if it's a new record from the same validator, it will be replaced.
+        // If it's a new record from the same validator, it will be ignored.
         let time2 = timestamp();
         let last_voted_fork_slots2 =
             vec![root_slot + 1, root_slot + 2, root_slot + 3, root_slot + 4];
         let last_vote_bankhash2 = Hash::new_unique();
+        let new_last_voted_fork_slots = RestartLastVotedForkSlots::new(
+            test_state.validator_voting_keypairs[0]
+                .node_keypair
+                .pubkey(),
+            time2,
+            &last_voted_fork_slots2,
+            last_vote_bankhash2,
+            SHRED_VERSION,
+        )
+        .unwrap();
         assert_eq!(
-            test_state.slots_aggregate.aggregate(
+            test_state
+                .slots_aggregate
+                .aggregate(new_last_voted_fork_slots.clone(),),
+            LastVotedForkSlotsAggregateResult::DifferentVersionExists(
                 RestartLastVotedForkSlots::new(
                     test_state.validator_voting_keypairs[0]
                         .node_keypair
                         .pubkey(),
-                    time2,
-                    &last_voted_fork_slots2,
-                    last_vote_bankhash2,
+                    time1,
+                    &test_state.last_voted_fork_slots,
+                    last_vote_bankhash,
                     SHRED_VERSION,
                 )
                 .unwrap(),
+                new_last_voted_fork_slots
             ),
-            Some(LastVotedForkSlotsRecord {
-                wallclock: time2,
-                last_voted_fork_slots: last_voted_fork_slots2.clone(),
-                last_vote_bankhash: last_vote_bankhash2.to_string(),
-                shred_version: SHRED_VERSION as u32,
-            }),
         );
         // percentage doesn't change since it's a replace.
         assert_eq!(test_state.slots_aggregate.min_active_percent(), 40.0);
@@ -650,7 +620,7 @@ mod tests {
                     }
                 )
                 .unwrap(),
-            None,
+            LastVotedForkSlotsAggregateResult::AlreadyExists,
         );
         assert_eq!(
             test_state.slots_aggregate.get_final_result(),
@@ -659,7 +629,6 @@ mod tests {
                     (root_slot + 1, 400),
                     (root_slot + 2, 400),
                     (root_slot + 3, 400),
-                    (root_slot + 4, 100),
                 ]
                 .into_iter()
                 .collect(),
@@ -704,7 +673,7 @@ mod tests {
                     &last_voted_fork_slots_record,
                 )
                 .unwrap(),
-            Some(last_voted_fork_slots_record.clone()),
+            LastVotedForkSlotsAggregateResult::Inserted(last_voted_fork_slots_record.clone()),
         );
         // Then test that it fails if the record is invalid.
 
