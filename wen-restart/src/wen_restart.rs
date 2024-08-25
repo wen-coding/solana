@@ -682,10 +682,9 @@ pub(crate) fn aggregate_restart_heaviest_fork(
     );
     if let Some(aggregate_record) = &progress.heaviest_fork_aggregate {
         for (key_string, message) in &aggregate_record.received {
-            match heaviest_fork_aggregate.aggregate_from_record(key_string, message) {
+            if let Err(e) = heaviest_fork_aggregate.aggregate_from_record(key_string, message) {
                 // Do not abort wen_restart if we got one malformed message.
-                Err(e) => error!("Failed to aggregate from record: {:?}", e),
-                Ok(_) => (),
+                error!("Failed to aggregate from record: {:?}", e);
             }
         }
     } else {
