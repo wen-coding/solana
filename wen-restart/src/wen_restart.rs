@@ -280,7 +280,6 @@ pub(crate) fn aggregate_restart_last_voted_fork_slots(
                     );
                 }
                 LastVotedForkSlotsAggregateResult::AlreadyExists => (),
-                LastVotedForkSlotsAggregateResult::Malformed => (),
             }
         }
         // Because all operations on the aggregate are called from this single thread, we can

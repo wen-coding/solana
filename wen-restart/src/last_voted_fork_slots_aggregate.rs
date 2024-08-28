@@ -53,7 +53,6 @@ pub enum LastVotedForkSlotsAggregateResult {
     AlreadyExists,
     DifferentVersionExists(RestartLastVotedForkSlots, RestartLastVotedForkSlots),
     Inserted(LastVotedForkSlotsRecord),
-    Malformed,
 }
 
 impl LastVotedForkSlotsAggregate {
@@ -149,9 +148,10 @@ impl LastVotedForkSlotsAggregate {
         let root_slot = self.root_bank.slot();
         let new_slots_vec = new_slots.to_slots(root_slot);
         if new_slots_vec.is_empty() {
-            // We don't want to exit wen_restart because we got malformed message.
-            warn!("The slots from {from} is empty");
-            return LastVotedForkSlotsAggregateResult::Malformed;
+            // This could be a validator that has super old vote, we still want to
+            // count it in active peers though because it will switch to agreed upon
+            // heaviest fork later.
+            info!("The slots from {from} is older than root slot {root_slot}");
         }
         if let Some(old_slots) = self.last_voted_fork_slots.get(from) {
             if old_slots.to_slots(self.root_bank.slot()) == new_slots_vec {
@@ -166,7 +166,7 @@ impl LastVotedForkSlotsAggregate {
         self.last_voted_fork_slots.insert(*from, new_slots.clone());
         let last_vote_epoch = self
             .root_bank
-            .get_epoch_and_slot_index(*new_slots_vec.last().unwrap())
+            .get_epoch_and_slot_index(new_slots.last_voted_slot)
             .0;
         self.update_epoch_info(from, last_vote_epoch);
         self.insert_message(from, &new_slots_vec);
@@ -242,6 +242,7 @@ mod tests {
         solana_gossip::restart_crds_values::RestartLastVotedForkSlots,
         solana_program::clock::Slot,
         solana_runtime::{
+            accounts_background_service::AbsRequestSender,
             bank::Bank,
             epoch_stakes::EpochStakes,
             genesis_utils::{
@@ -276,6 +277,14 @@ mod tests {
             vec![100; validator_voting_keypairs.len()],
         );
         let (_, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
+        let bank0 = bank_forks.read().unwrap().root_bank();
+        let bank1 = Bank::new_from_parent(bank0.clone(), &Pubkey::default(), 1);
+        bank_forks.write().unwrap().insert(bank1);
+        assert!(bank_forks
+            .write()
+            .unwrap()
+            .set_root(1, &AbsRequestSender::default(), None)
+            .is_ok());
         let root_bank = bank_forks.read().unwrap().root_bank();
         let root_slot = root_bank.slot();
         let last_voted_fork_slots = vec![
@@ -469,6 +478,30 @@ mod tests {
             LastVotedForkSlotsAggregateResult::AlreadyExists,
         );
 
+        // Test that someone sending super old vote is still counted in active peers.
+        let super_old_validator = test_state.validator_voting_keypairs
+            [initial_num_active_validators + 2]
+            .node_keypair
+            .pubkey();
+        let super_old_validator_last_voted_slots = RestartLastVotedForkSlots::new(
+            super_old_validator,
+            timestamp(),
+            &[root_slot - 1],
+            Hash::default(),
+            SHRED_VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            test_state
+                .slots_aggregate
+                .aggregate(super_old_validator_last_voted_slots),
+            LastVotedForkSlotsAggregateResult::Inserted(LastVotedForkSlotsRecord {
+                last_voted_fork_slots: vec![],
+                last_vote_bankhash: Hash::default().to_string(),
+                shred_version: SHRED_VERSION as u32,
+                wallclock: timestamp(),
+            }),
+        );
         assert_eq!(
             test_state.slots_aggregate.get_final_result(),
             LastVotedForkSlotsFinalResult {
@@ -483,13 +516,13 @@ mod tests {
                     LastVotedForkSlotsEpochInfo {
                         epoch: 0,
                         total_stake: 1000,
-                        actively_voting_stake: 500,
-                        actively_voting_for_this_epoch_stake: 500,
+                        actively_voting_stake: 600,
+                        actively_voting_for_this_epoch_stake: 600,
                     },
                     LastVotedForkSlotsEpochInfo {
                         epoch: 1,
                         total_stake: 1000,
-                        actively_voting_stake: 500,
+                        actively_voting_stake: 600,
                         actively_voting_for_this_epoch_stake: 0,
                     }
                 ],
