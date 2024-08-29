@@ -146,6 +146,7 @@ impl LastVotedForkSlotsAggregate {
             return LastVotedForkSlotsAggregateResult::AlreadyExists;
         }
         let root_slot = self.root_bank.slot();
+        // to_slots will discard any slot < root_slot.
         let new_slots_vec = new_slots.to_slots(root_slot);
         if new_slots_vec.is_empty() {
             // This could be a validator that has super old vote, we still want to
