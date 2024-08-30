@@ -133,9 +133,7 @@ impl HeaviestForkAggregate {
             shred_version: received_heaviest_fork.shred_version as u32,
             wallclock: received_heaviest_fork.wallclock,
         };
-        let mut entry_exists = false;
         if let Some(old_heaviest_fork) = self.heaviest_forks.get(from) {
-            entry_exists = true;
             if old_heaviest_fork.last_slot != received_heaviest_fork.last_slot
                 || old_heaviest_fork.last_slot_hash != received_heaviest_fork.last_slot_hash
             {
@@ -147,10 +145,7 @@ impl HeaviestForkAggregate {
             if !Self::should_replace(old_heaviest_fork, &received_heaviest_fork) {
                 return HeaviestForkAggregateResult::AlreadyExists;
             }
-        }
-        self.heaviest_forks
-            .insert(*from, received_heaviest_fork.clone());
-        if !entry_exists {
+        } else {
             let entry = self
                 .block_stake_map
                 .entry((
@@ -161,6 +156,8 @@ impl HeaviestForkAggregate {
             *entry = entry.saturating_add(sender_stake);
             self.active_peers.insert(*from);
         }
+        self.heaviest_forks
+            .insert(*from, received_heaviest_fork.clone());
         if received_heaviest_fork.observed_stake as f64 / total_stake as f64
             >= self.supermajority_threshold
         {
