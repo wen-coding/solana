@@ -86,20 +86,31 @@ impl HeaviestForkAggregate {
         Ok(self.aggregate(restart_heaviest_fork))
     }
 
-    fn should_replace(
+    fn is_valid_change(
         current_heaviest_fork: &RestartHeaviestFork,
         new_heaviest_fork: &RestartHeaviestFork,
-    ) -> bool {
-        if current_heaviest_fork == new_heaviest_fork {
-            return false;
+    ) -> HeaviestForkAggregateResult {
+        if current_heaviest_fork.last_slot != new_heaviest_fork.last_slot
+            || current_heaviest_fork.last_slot_hash != new_heaviest_fork.last_slot_hash
+        {
+            return HeaviestForkAggregateResult::DifferentVersionExists(
+                current_heaviest_fork.clone(),
+                new_heaviest_fork.clone(),
+            );
         }
-        if current_heaviest_fork.wallclock > new_heaviest_fork.wallclock {
-            return false;
+        if current_heaviest_fork == new_heaviest_fork
+            || current_heaviest_fork.wallclock > new_heaviest_fork.wallclock
+            || current_heaviest_fork.observed_stake == new_heaviest_fork.observed_stake
+        {
+            return HeaviestForkAggregateResult::AlreadyExists;
         }
-        if current_heaviest_fork.observed_stake == new_heaviest_fork.observed_stake {
-            return false;
-        }
-        true
+        HeaviestForkAggregateResult::Inserted(HeaviestForkRecord {
+            slot: new_heaviest_fork.last_slot,
+            bankhash: new_heaviest_fork.last_slot_hash.to_string(),
+            total_active_stake: new_heaviest_fork.observed_stake,
+            shred_version: new_heaviest_fork.shred_version as u32,
+            wallclock: new_heaviest_fork.wallclock,
+        })
     }
 
     pub(crate) fn aggregate(
@@ -126,25 +137,14 @@ impl HeaviestForkAggregate {
             );
             return HeaviestForkAggregateResult::Malformed;
         }
-        let record = HeaviestForkRecord {
-            slot: received_heaviest_fork.last_slot,
-            bankhash: received_heaviest_fork.last_slot_hash.to_string(),
-            total_active_stake: received_heaviest_fork.observed_stake,
-            shred_version: received_heaviest_fork.shred_version as u32,
-            wallclock: received_heaviest_fork.wallclock,
-        };
-        if let Some(old_heaviest_fork) = self.heaviest_forks.get(from) {
-            if old_heaviest_fork.last_slot != received_heaviest_fork.last_slot
-                || old_heaviest_fork.last_slot_hash != received_heaviest_fork.last_slot_hash
-            {
-                return HeaviestForkAggregateResult::DifferentVersionExists(
-                    old_heaviest_fork.clone(),
-                    received_heaviest_fork,
-                );
+        let result = if let Some(old_heaviest_fork) = self.heaviest_forks.get(from) {
+            let result = Self::is_valid_change(old_heaviest_fork, &received_heaviest_fork);
+            if let HeaviestForkAggregateResult::Inserted(_) = result {
+                // continue following processing
+            } else {
+                return result;
             }
-            if !Self::should_replace(old_heaviest_fork, &received_heaviest_fork) {
-                return HeaviestForkAggregateResult::AlreadyExists;
-            }
+            result
         } else {
             let entry = self
                 .block_stake_map
@@ -155,7 +155,14 @@ impl HeaviestForkAggregate {
                 .or_insert(0);
             *entry = entry.saturating_add(sender_stake);
             self.active_peers.insert(*from);
-        }
+            HeaviestForkAggregateResult::Inserted(HeaviestForkRecord {
+                slot: received_heaviest_fork.last_slot,
+                bankhash: received_heaviest_fork.last_slot_hash.to_string(),
+                total_active_stake: received_heaviest_fork.observed_stake,
+                shred_version: received_heaviest_fork.shred_version as u32,
+                wallclock: received_heaviest_fork.wallclock,
+            })
+        };
         self.heaviest_forks
             .insert(*from, received_heaviest_fork.clone());
         if received_heaviest_fork.observed_stake as f64 / total_stake as f64
@@ -170,7 +177,7 @@ impl HeaviestForkAggregate {
         {
             self.active_peers_seen_supermajority.insert(self.my_pubkey);
         }
-        HeaviestForkAggregateResult::Inserted(record)
+        result
     }
 
     pub(crate) fn total_active_stake(&self) -> u64 {
