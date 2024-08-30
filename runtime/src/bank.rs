@@ -35,6 +35,7 @@
 //! already been signed and verified.
 use {
     crate::{
+        account_saver::collect_accounts_to_store,
         bank::{
             builtins::{BuiltinPrototype, BUILTINS, STATELESS_BUILTINS},
             metrics::*,
@@ -86,10 +87,11 @@ use {
         stake_rewards::StakeReward,
         storable_accounts::StorableAccounts,
     },
-    solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
+    solana_bpf_loader_program::syscalls::{
+        create_program_runtime_environment_v1, create_program_runtime_environment_v2,
+    },
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_cost_model::cost_tracker::CostTracker,
-    solana_loader_v4_program::create_program_runtime_environment_v2,
     solana_measure::{measure::Measure, measure_time, measure_us},
     solana_program_runtime::{
         invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
@@ -153,7 +155,6 @@ use {
     solana_svm::{
         account_loader::{collect_rent_from_account, LoadedTransaction},
         account_overrides::AccountOverrides,
-        account_saver::collect_accounts_to_store,
         transaction_commit_result::{CommittedTransaction, TransactionCommitResult},
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_execution_result::{
@@ -3477,9 +3478,7 @@ impl Bank {
         timings.saturating_add_in_place(ExecuteTimingType::CheckUs, check_us);
 
         let (blockhash, lamports_per_signature) = self.last_blockhash_and_lamports_per_signature();
-        // TODO: Pass into `TransactionProcessingEnvironment` in place of
-        // `rent_collector` when SVM supports the new `SVMRentCollector` trait.
-        let _rent_collector_with_metrics =
+        let rent_collector_with_metrics =
             RentCollectorWithMetrics::new(self.rent_collector.clone());
         let processing_environment = TransactionProcessingEnvironment {
             blockhash,
@@ -3488,7 +3487,7 @@ impl Bank {
             feature_set: Arc::clone(&self.feature_set),
             fee_structure: Some(&self.fee_structure),
             lamports_per_signature,
-            rent_collector: Some(&self.rent_collector),
+            rent_collector: Some(&rent_collector_with_metrics),
         };
 
         let sanitized_output = self
