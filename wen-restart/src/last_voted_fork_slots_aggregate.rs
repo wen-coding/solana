@@ -28,7 +28,10 @@ pub(crate) struct LastVotedForkSlotsEpochInfo {
     // Total stake of active peers in this epoch, no matter they voted for a slot
     // in this epoch or not.
     pub actively_voting_stake: u64,
-    // Total stake of active peers which has voted for a slot in this epoch.
+    // Total stake of active peers which has voted for any slot in this epoch.
+    // Note that if last_vote slot belongs to epoch n, then this validator should
+    // have voted for at least one slot in epoch n - 1, so it should be counted
+    // in earlier epoch as well.
     pub actively_voting_for_this_epoch_stake: u64,
 }
 
