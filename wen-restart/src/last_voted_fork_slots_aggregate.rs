@@ -16,9 +16,12 @@ use {
     },
 };
 
-// If at least 1/3 of the stake has voted for a slot in next Epoch, we think
+// If at least 1/3 of the stake has voted for any slot in next Epoch, we think
 // the cluster's clock is in sync and everyone will enter the new Epoch soon.
 // So we require that we have >80% stake in the new Epoch to exit.
+// We use actively_voting_for_this_epoch_stake to determine whether 1/3 of the
+// stake has voted for any slot in this Epoch, and then we use actively_voting_stake
+// to determine if we have >80% stake in this Epoch.
 const EPOCH_CONSIDERED_FOR_EXIT_THRESHOLD: f64 = 1f64 / 3f64;
 
 #[derive(Debug, Clone, PartialEq)]
