@@ -660,6 +660,7 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
 pub(crate) fn send_restart_heaviest_fork(
     cluster_info: Arc<ClusterInfo>,
     exit: Arc<AtomicBool>,
+    only_loop_once: bool,
     progress: &mut WenRestartProgress,
 ) -> Result<()> {
     if progress.my_heaviest_fork.is_none() {
@@ -677,6 +678,9 @@ pub(crate) fn send_restart_heaviest_fork(
             break;
         }
         cluster_info.push_restart_heaviest_fork(heaviest_fork_slot, heaviest_fork_hash, 0);
+        if only_loop_once {
+            break;
+        }
         sleep(Duration::from_secs(HEAVIEST_REFRESH_INTERVAL_IN_SECONDS));
     }
     Ok(())
@@ -912,6 +916,7 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     send_restart_heaviest_fork(
                         config.cluster_info.clone(),
                         config.exit.clone(),
+                        true, // only_loop_once
                         &mut progress,
                     )?;
                 } else {
@@ -964,6 +969,14 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     --no-snapshot-fetch",
                     slot, hash, shred_version,
                 );
+                if config.cluster_info.id() == config.wen_restart_leader {
+                    send_restart_heaviest_fork(
+                        config.cluster_info.clone(),
+                        config.exit.clone(),
+                        false, // only_loop_once
+                        &mut progress,
+                    )?;
+                }
                 return Ok(());
             }
         };
