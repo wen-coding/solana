@@ -647,6 +647,11 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
                 cur_bank
             }
         };
+        info!(
+            "wen_restart find bankhash slot: {} hash: {}",
+            slot,
+            bank.hash()
+        );
         parent_bank = bank;
     }
     Ok(parent_bank.hash())
@@ -729,11 +734,13 @@ fn repair_heaviest_fork(
         }
         let to_repair = if blockstore.meta(heaviest_slot).is_ok_and(|x| x.is_some()) {
             AncestorIterator::new_inclusive(heaviest_slot, &blockstore)
-                .take_while(|slot| *slot > my_heaviest_fork_slot && !blockstore.is_full(*slot))
+                .take_while(|slot| *slot > my_heaviest_fork_slot)
+                .filter(|slot| !blockstore.is_full(*slot))
                 .collect()
         } else {
             vec![heaviest_slot]
         };
+        info!("wen_restart repair slots: {:?}", to_repair);
         if to_repair.is_empty() {
             return Ok(()); // All blocks are full
         }
