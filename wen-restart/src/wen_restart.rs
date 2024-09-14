@@ -570,15 +570,16 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
     root_bank: Arc<Bank>,
     exit: &AtomicBool,
 ) -> Result<Hash> {
-    let heaviest_fork_bankhash = bank_forks
-        .read()
-        .unwrap()
-        .get(heaviest_fork_slot)
-        .map(|bank| bank.hash());
-    if let Some(hash) = heaviest_fork_bankhash {
-        return Ok(hash);
+    {
+        if let Some(hash) = bank_forks
+            .read()
+            .unwrap()
+            .get(heaviest_fork_slot)
+            .map(|bank| bank.hash())
+        {
+            return Ok(hash);
+        }
     }
-
     let leader_schedule_cache = LeaderScheduleCache::new_from_bank(&root_bank);
     let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("solReplayTx{i:02}"))
