@@ -769,10 +769,14 @@ pub(crate) fn verify_restart_heaviest_fork(
         blockstore.clone(),
         wen_restart_repair_slots.clone(),
     )?;
-    let root_bank = bank_forks.read().unwrap().root_bank();
+    let root_bank;
+    {
+        root_bank = bank_forks.read().unwrap().root_bank();
+    }
     let root_slot = root_bank.slot();
-    let mut slots: Vec<Slot> =
-        AncestorIterator::new_inclusive(heaviest_slot, &blockstore).collect();
+    let mut slots: Vec<Slot> = AncestorIterator::new_inclusive(heaviest_slot, &blockstore)
+        .take_while(|slot| slot >= &root_slot)
+        .collect();
     slots.sort();
     if !slots.contains(&root_slot) {
         return Err(
@@ -802,7 +806,7 @@ pub(crate) fn verify_restart_heaviest_fork(
             slots,
             blockstore.clone(),
             bank_forks.clone(),
-            bank_forks.read().unwrap().root_bank(),
+            root_bank,
             &exit,
         )?
     } else if let Some(bank) = bank_forks.read().unwrap().get(heaviest_slot) {
