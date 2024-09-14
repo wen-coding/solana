@@ -710,17 +710,17 @@ pub(crate) fn receive_restart_heaviest_fork(
                 "Received new heaviest fork from leader: {} {:?}",
                 wen_restart_leader, new_heaviest_fork
             );
-            let heaviest_slot = new_heaviest_fork.last_slot;
-            let heaviest_hash = new_heaviest_fork.last_slot_hash;
+            let leader_heaviest_slot = new_heaviest_fork.last_slot;
+            let leader_heaviest_hash = new_heaviest_fork.last_slot_hash;
             progress.leader_heaviest_fork = Some(HeaviestForkRecord {
-                slot: heaviest_slot,
-                bankhash: heaviest_hash.to_string(),
+                slot: leader_heaviest_slot,
+                bankhash: leader_heaviest_hash.to_string(),
                 total_active_stake: 0,
                 wallclock: new_heaviest_fork.wallclock,
                 shred_version: new_heaviest_fork.shred_version as u32,
                 from: new_heaviest_fork.from.to_string(),
             });
-            return Ok((heaviest_slot, heaviest_hash));
+            return Ok((leader_heaviest_slot, leader_heaviest_hash));
         }
         sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
     }
@@ -754,10 +754,10 @@ fn repair_heaviest_fork(
     }
 }
 
-pub(crate) fn verify_restart_heaviest_fork(
+pub(crate) fn verify_leader_heaviest_fork(
     my_heaviest_fork_slot: Slot,
-    heaviest_slot: Slot,
-    heaviest_hash: &Hash,
+    leader_heaviest_slot: Slot,
+    leader_heaviest_hash: &Hash,
     bank_forks: Arc<RwLock<BankForks>>,
     blockstore: Arc<Blockstore>,
     exit: Arc<AtomicBool>,
@@ -765,7 +765,7 @@ pub(crate) fn verify_restart_heaviest_fork(
 ) -> Result<()> {
     repair_heaviest_fork(
         my_heaviest_fork_slot,
-        heaviest_slot,
+        leader_heaviest_slot,
         exit.clone(),
         blockstore.clone(),
         wen_restart_repair_slots.clone(),
@@ -775,50 +775,55 @@ pub(crate) fn verify_restart_heaviest_fork(
         root_bank = bank_forks.read().unwrap().root_bank();
     }
     let root_slot = root_bank.slot();
-    let mut slots: Vec<Slot> = AncestorIterator::new_inclusive(heaviest_slot, &blockstore)
+    let mut slots: Vec<Slot> = AncestorIterator::new_inclusive(leader_heaviest_slot, &blockstore)
         .take_while(|slot| slot >= &root_slot)
         .collect();
     slots.sort();
     if !slots.contains(&root_slot) {
-        return Err(
-            WenRestartError::HeaviestForkOnLeaderOnDifferentFork(heaviest_slot, root_slot).into(),
-        );
-    }
-    if heaviest_slot > my_heaviest_fork_slot && !slots.contains(&my_heaviest_fork_slot) {
         return Err(WenRestartError::HeaviestForkOnLeaderOnDifferentFork(
-            heaviest_slot,
+            leader_heaviest_slot,
+            root_slot,
+        )
+        .into());
+    }
+    if leader_heaviest_slot > my_heaviest_fork_slot && !slots.contains(&my_heaviest_fork_slot) {
+        return Err(WenRestartError::HeaviestForkOnLeaderOnDifferentFork(
+            leader_heaviest_slot,
             my_heaviest_fork_slot,
         )
         .into());
     }
-    if heaviest_slot < my_heaviest_fork_slot
+    if leader_heaviest_slot < my_heaviest_fork_slot
         && !AncestorIterator::new(my_heaviest_fork_slot, &blockstore)
-            .any(|slot| slot == heaviest_slot)
+            .any(|slot| slot == leader_heaviest_slot)
     {
         return Err(WenRestartError::HeaviestForkOnLeaderOnDifferentFork(
-            heaviest_slot,
+            leader_heaviest_slot,
             my_heaviest_fork_slot,
         )
         .into());
     }
     let my_bankhash = if !slots.is_empty() {
         find_bankhash_of_heaviest_fork(
-            heaviest_slot,
+            leader_heaviest_slot,
             slots,
             blockstore.clone(),
             bank_forks.clone(),
             root_bank,
             &exit,
         )?
-    } else if let Some(bank) = bank_forks.read().unwrap().get(heaviest_slot) {
+    } else if let Some(bank) = bank_forks.read().unwrap().get(leader_heaviest_slot) {
         bank.hash()
     } else {
-        return Err(WenRestartError::BlockNotFound(heaviest_slot).into());
+        return Err(WenRestartError::BlockNotFound(leader_heaviest_slot).into());
     };
-    if my_bankhash != *heaviest_hash {
-        return Err(
-            WenRestartError::BankHashMismatch(heaviest_slot, my_bankhash, *heaviest_hash).into(),
-        );
+    if my_bankhash != *leader_heaviest_hash {
+        return Err(WenRestartError::BankHashMismatch(
+            leader_heaviest_slot,
+            my_bankhash,
+            *leader_heaviest_hash,
+        )
+        .into());
     }
     Ok(())
 }
@@ -931,7 +936,7 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                         config.exit.clone(),
                         &mut progress,
                     )?;
-                    verify_restart_heaviest_fork(
+                    verify_leader_heaviest_fork(
                         new_root_slot,
                         leader_slot,
                         &leader_hash,
