@@ -1007,13 +1007,6 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     config
                         .cluster_info
                         .push_restart_heaviest_fork(new_root_slot, new_root_hash, 0);
-                    aggregate_restart_heaviest_fork(
-                        &config.wen_restart_path,
-                        config.cluster_info.clone(),
-                        config.bank_forks.clone(),
-                        config.exit.clone(),
-                        &mut progress,
-                    )?;
                 } else {
                     let (leader_slot, leader_hash) = receive_restart_heaviest_fork(
                         config.wen_restart_leader,
@@ -1081,6 +1074,15 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     --no-snapshot-fetch",
                     slot, hash, shred_version,
                 );
+                if config.cluster_info.id() == config.wen_restart_leader {
+                    aggregate_restart_heaviest_fork(
+                        &config.wen_restart_path,
+                        config.cluster_info.clone(),
+                        config.bank_forks.clone(),
+                        config.exit.clone(),
+                        &mut progress,
+                    )?;
+                }
                 return Ok(());
             }
         };

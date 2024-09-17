@@ -64,8 +64,8 @@ message WenRestartProgress {
     optional LastVotedForkSlotsRecord my_last_voted_fork_slots = 2;
     optional LastVotedForkSlotsAggregateRecord last_voted_fork_slots_aggregate = 3;
     optional HeaviestForkRecord my_heaviest_fork = 4;
-    optional HeaviestForkRecord leader_heaviest_fork = 5;
-    optional HeaviestForkAggregateRecord heaviest_fork_aggregate = 6;
+    optional HeaviestForkAggregateRecord heaviest_fork_aggregate = 5;
+    optional HeaviestForkRecord leader_heaviest_fork = 6;
     optional GenerateSnapshotRecord my_snapshot = 7;
     map<string, ConflictMessage> conflict_message = 8;
 }
