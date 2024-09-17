@@ -3274,4 +3274,61 @@ mod tests {
         .is_ok());
         assert!(wait_for_wen_restart(config).is_ok());
     }
+
+    #[test]
+    fn test_receive_restart_heaviest_fork() {
+        let mut rng = rand::thread_rng();
+        let leader_keypair = Keypair::new();
+        let node_keypair = Arc::new(Keypair::new());
+        let cluster_info = Arc::new(ClusterInfo::new(
+            {
+                let mut contact_info =
+                    ContactInfo::new_localhost(&node_keypair.pubkey(), timestamp());
+                contact_info.set_shred_version(SHRED_VERSION);
+                contact_info
+            },
+            node_keypair.clone(),
+            SocketAddrSpace::Unspecified,
+        ));
+        let exit = Arc::new(AtomicBool::new(false));
+        let random_keypair = Keypair::new();
+        let random_node = ContactInfo::new_rand(&mut rng, Some(random_keypair.pubkey()));
+        let random_slot = 3;
+        let random_hash = Hash::new_unique();
+        push_restart_heaviest_fork(
+            cluster_info.clone(),
+            &random_node,
+            random_slot,
+            &random_hash,
+            0,
+            &random_keypair,
+            timestamp(),
+        );
+        let leader_node = ContactInfo::new_rand(&mut rng, Some(leader_keypair.pubkey()));
+        let leader_slot = 6;
+        let leader_hash = Hash::new_unique();
+        push_restart_heaviest_fork(
+            cluster_info.clone(),
+            &leader_node,
+            leader_slot,
+            &leader_hash,
+            0,
+            &leader_keypair,
+            timestamp(),
+        );
+        let mut progress = WenRestartProgress {
+            state: RestartState::HeaviestFork.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            receive_restart_heaviest_fork(
+                leader_keypair.pubkey(),
+                cluster_info,
+                exit,
+                &mut progress
+            )
+            .unwrap(),
+            (leader_slot, leader_hash)
+        );
+    }
 }
