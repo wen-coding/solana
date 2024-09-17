@@ -750,7 +750,7 @@ pub(crate) fn aggregate_restart_heaviest_fork(
                 .unwrap()
                 .total_active_stake = current_total_active_stake;
             info!(
-                "Total active stake: {} Total stake {} Percentage {}%",
+                "Total active stake: {} Total stake {} Percentage {:.2}%",
                 total_active_stake,
                 total_stake,
                 total_active_stake as f64 * 100.0 / total_stake as f64,
@@ -777,34 +777,29 @@ pub(crate) fn receive_restart_heaviest_fork(
             return Err(WenRestartError::Exiting.into());
         }
         for new_heaviest_fork in cluster_info.get_restart_heaviest_fork(&mut cursor) {
-            if new_heaviest_fork.from != wen_restart_leader {
-                warn!(
-                    "Received heaviest fork from non leader: {}",
-                    new_heaviest_fork.from
+            if new_heaviest_fork.from == wen_restart_leader {
+                info!(
+                    "Received new heaviest fork from leader: {} {:?}",
+                    wen_restart_leader, new_heaviest_fork
                 );
-                continue;
+                let leader_heaviest_slot = new_heaviest_fork.last_slot;
+                let leader_heaviest_hash = new_heaviest_fork.last_slot_hash;
+                progress.leader_heaviest_fork = Some(HeaviestForkRecord {
+                    slot: leader_heaviest_slot,
+                    bankhash: leader_heaviest_hash.to_string(),
+                    total_active_stake: 0,
+                    wallclock: new_heaviest_fork.wallclock,
+                    shred_version: new_heaviest_fork.shred_version as u32,
+                    from: new_heaviest_fork.from.to_string(),
+                });
+                return Ok((leader_heaviest_slot, leader_heaviest_hash));
             }
-            info!(
-                "Received new heaviest fork from leader: {} {:?}",
-                wen_restart_leader, new_heaviest_fork
-            );
-            let leader_heaviest_slot = new_heaviest_fork.last_slot;
-            let leader_heaviest_hash = new_heaviest_fork.last_slot_hash;
-            progress.leader_heaviest_fork = Some(HeaviestForkRecord {
-                slot: leader_heaviest_slot,
-                bankhash: leader_heaviest_hash.to_string(),
-                total_active_stake: 0,
-                wallclock: new_heaviest_fork.wallclock,
-                shred_version: new_heaviest_fork.shred_version as u32,
-                from: new_heaviest_fork.from.to_string(),
-            });
-            return Ok((leader_heaviest_slot, leader_heaviest_hash));
         }
         sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
     }
 }
 
-fn repair_heaviest_fork(
+pub(crate) fn repair_heaviest_fork(
     my_heaviest_fork_slot: Slot,
     heaviest_slot: Slot,
     exit: Arc<AtomicBool>,
