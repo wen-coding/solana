@@ -3331,4 +3331,59 @@ mod tests {
             (leader_slot, leader_hash)
         );
     }
+
+    #[test]
+    fn test_repair_heaviest_fork() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let my_heaviest_fork_slot = 1;
+        let leader_heaviest_slot_parent = 2;
+        let leader_heaviest_slot = 3;
+        let exit = Arc::new(AtomicBool::new(false));
+        let blockstore = Arc::new(Blockstore::open(ledger_path.path()).unwrap());
+        let wen_restart_repair_slots = Arc::new(RwLock::new(Vec::new()));
+        let exit_clone = exit.clone();
+        let blockstore_clone = blockstore.clone();
+        let wen_restart_repair_slots_clone = wen_restart_repair_slots.clone();
+        let repair_heaviest_fork_thread_handle = Builder::new()
+            .name("solana-repair-heaviest-fork".to_string())
+            .spawn(move || {
+                assert!(repair_heaviest_fork(
+                    my_heaviest_fork_slot,
+                    leader_heaviest_slot,
+                    exit_clone,
+                    blockstore_clone,
+                    wen_restart_repair_slots_clone
+                )
+                .is_ok());
+            })
+            .unwrap();
+        sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
+        // When there is nothing in blockstore, should repair the heaviest slot.
+        assert_eq!(
+            *wen_restart_repair_slots.read().unwrap(),
+            vec![leader_heaviest_slot]
+        );
+        // Now add block 3, 3's parent is 2, should repair 2.
+        let _ = insert_slots_into_blockstore(
+            blockstore.clone(),
+            leader_heaviest_slot_parent,
+            &[leader_heaviest_slot],
+            TICKS_PER_SLOT,
+            Hash::default(),
+        );
+        sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
+        assert_eq!(
+            *wen_restart_repair_slots.read().unwrap(),
+            vec![leader_heaviest_slot_parent]
+        );
+        // Insert 2 which links to 1, should exit now.
+        let _ = insert_slots_into_blockstore(
+            blockstore.clone(),
+            my_heaviest_fork_slot,
+            &[leader_heaviest_slot_parent],
+            TICKS_PER_SLOT,
+            Hash::default(),
+        );
+        repair_heaviest_fork_thread_handle.join().unwrap();
+    }
 }
