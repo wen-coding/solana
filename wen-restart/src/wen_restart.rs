@@ -885,10 +885,13 @@ pub(crate) fn verify_leader_heaviest_fork(
             root_bank,
             &exit,
         )?
-    } else if let Some(bank) = bank_forks.read().unwrap().get(leader_heaviest_slot) {
-        bank.hash()
     } else {
-        return Err(WenRestartError::BlockNotFound(leader_heaviest_slot).into());
+        bank_forks
+            .read()
+            .unwrap()
+            .get(leader_heaviest_slot)
+            .unwrap()
+            .hash()
     };
     if my_bankhash != *leader_heaviest_hash {
         return Err(WenRestartError::BankHashMismatch(
@@ -3385,5 +3388,68 @@ mod tests {
             Hash::default(),
         );
         repair_heaviest_fork_thread_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_verify_leader_heaviest_fork() {
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let test_state = wen_restart_test_init(&ledger_path);
+        let last_vote = test_state.last_voted_fork_slots[0];
+        let exit = Arc::new(AtomicBool::new(false));
+        // Create two forks: last_vote -> last_vote+1 and last_vote -> last_vote+2
+        let root_bank;
+        {
+            root_bank = test_state.bank_forks.read().unwrap().root_bank().clone();
+        }
+        let leader_slot = last_vote + 1;
+        let my_slot = last_vote + 2;
+        let _ = insert_slots_into_blockstore(
+            test_state.blockstore.clone(),
+            last_vote,
+            &[leader_slot],
+            TICKS_PER_SLOT,
+            test_state.last_blockhash,
+        );
+        let _ = insert_slots_into_blockstore(
+            test_state.blockstore.clone(),
+            last_vote,
+            &[my_slot],
+            TICKS_PER_SLOT,
+            test_state.last_blockhash,
+        );
+        let wen_restart_repair_slots = Arc::new(RwLock::new(Vec::new()));
+        assert_eq!(
+            verify_leader_heaviest_fork(
+                my_slot,
+                leader_slot,
+                &Hash::default(),
+                test_state.bank_forks.clone(),
+                test_state.blockstore.clone(),
+                exit.clone(),
+                wen_restart_repair_slots.clone()
+            )
+            .unwrap_err()
+            .downcast::<WenRestartError>()
+            .unwrap(),
+            WenRestartError::HeaviestForkOnLeaderOnDifferentFork(leader_slot, my_slot)
+        );
+        let leader_hash = Hash::new_unique();
+        let my_hash = root_bank.hash();
+        let root_slot = root_bank.slot();
+        assert_eq!(
+            verify_leader_heaviest_fork(
+                root_slot,
+                root_slot,
+                &leader_hash,
+                test_state.bank_forks.clone(),
+                test_state.blockstore.clone(),
+                exit.clone(),
+                wen_restart_repair_slots.clone()
+            )
+            .unwrap_err()
+            .downcast::<WenRestartError>()
+            .unwrap(),
+            WenRestartError::BankHashMismatch(root_slot, my_hash, leader_hash)
+        );
     }
 }
