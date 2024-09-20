@@ -437,7 +437,7 @@ EOF
 
     if [[ -n "$maybeWenRestart" ]]; then
       args+=(--wen-restart wen_restart.proto3)
-      args+=(--wen-restart-leader "$maybeWenRestart")
+      args+=(--wen-restart-coordinator "$maybeWenRestart")
     fi
 
 cat >> ~/solana/on-reboot <<EOF

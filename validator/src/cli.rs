@@ -1582,7 +1582,7 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .takes_value(true)
                 .required(false)
                 .conflicts_with("wait_for_supermajority")
-                .requires("wen_restart_leader")
+                .requires("wen_restart_coordinator")
                 .help(
                     "Only used during coordinated cluster restarts.\
                     \n\n\
@@ -1608,8 +1608,8 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 ),
         )
         .arg(
-            Arg::with_name("wen_restart_leader")
-                .long("wen-restart-leader")
+            Arg::with_name("wen_restart_coordinator")
+                .long("wen-restart-coordinator")
                 .hidden(hidden_unless_forced())
                 .value_name("PUBKEY")
                 .takes_value(true)
