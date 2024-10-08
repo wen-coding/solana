@@ -1581,9 +1581,6 @@ mod tests {
         let mut wen_restart_proto_path = ledger_path.path().to_path_buf();
         wen_restart_proto_path.push("wen_restart_status.proto");
         let _ = remove_file(&wen_restart_proto_path);
-        let wen_restart_coordinator = validator_voting_keypairs[COORDINATOR_INDEX]
-            .node_keypair
-            .pubkey();
         WenRestartTestInitResult {
             validator_voting_keypairs,
             blockstore,
