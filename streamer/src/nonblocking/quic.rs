@@ -39,6 +39,7 @@ use {
     },
     solana_transaction_metrics_tracker::signature_if_should_track_packet,
     std::{
+        fmt,
         iter::repeat_with,
         net::{IpAddr, SocketAddr, UdpSocket},
         pin::Pin,
@@ -195,10 +196,9 @@ pub fn spawn_server_multi(
     coalesce: Duration,
 ) -> Result<SpawnNonBlockingServerResult, QuicServerError> {
     info!("Start {name} quic server on {sockets:?}");
-    let concurrent_connections =
-        (max_staked_connections + max_unstaked_connections) / sockets.len();
+    let concurrent_connections = max_staked_connections + max_unstaked_connections;
     let max_concurrent_connections = concurrent_connections + concurrent_connections / 4;
-    let (config, _cert) = configure_server(keypair, max_concurrent_connections)?;
+    let (config, _) = configure_server(keypair)?;
 
     let endpoints = sockets
         .into_iter()
@@ -227,6 +227,7 @@ pub fn spawn_server_multi(
         stats.clone(),
         wait_for_chunk_timeout,
         coalesce,
+        max_concurrent_connections,
     ));
     Ok(SpawnNonBlockingServerResult {
         endpoints,
@@ -236,10 +237,56 @@ pub fn spawn_server_multi(
     })
 }
 
+/// struct ease tracking connections of all stages, so that we do not have to
+/// litter the code with open connection tracking. This is added into the
+/// connection table as part of the ConnectionEntry. The reference is auto
+/// reduced when it is dropped.
+
+struct ClientConnectionTracker {
+    stats: Arc<StreamerStats>,
+}
+
+/// This is required by ConnectionEntry for supporting debug format.
+impl fmt::Debug for ClientConnectionTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamerClientConnection")
+            .field(
+                "open_connections:",
+                &self.stats.open_connections.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+impl Drop for ClientConnectionTracker {
+    /// When this is dropped, reduce the open connection count.
+    fn drop(&mut self) {
+        self.stats.open_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl ClientConnectionTracker {
+    /// Check the max_concurrent_connections limit and if it is within the limit
+    /// create ClientConnectionTracker and increment open connection count. Otherwise returns Err
+    fn new(stats: Arc<StreamerStats>, max_concurrent_connections: usize) -> Result<Self, ()> {
+        let open_connections = stats.open_connections.fetch_add(1, Ordering::Relaxed);
+        if open_connections >= max_concurrent_connections {
+            stats.open_connections.fetch_sub(1, Ordering::Relaxed);
+            debug!(
+                "There are too many concurrent connections opened already: open: {}, max: {}",
+                open_connections, max_concurrent_connections
+            );
+            return Err(());
+        }
+
+        Ok(Self { stats })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_server(
     name: &'static str,
-    incoming: Vec<Endpoint>,
+    endpoints: Vec<Endpoint>,
     packet_sender: Sender<PacketBatch>,
     exit: Arc<AtomicBool>,
     max_connections_per_peer: usize,
@@ -251,6 +298,7 @@ async fn run_server(
     stats: Arc<StreamerStats>,
     wait_for_chunk_timeout: Duration,
     coalesce: Duration,
+    max_concurrent_connections: usize,
 ) {
     let rate_limiter = ConnectionRateLimiter::new(max_connections_per_ipaddr_per_min);
     let overall_connection_rate_limiter =
@@ -268,7 +316,7 @@ async fn run_server(
     ));
     stats
         .quic_endpoints_count
-        .store(incoming.len(), Ordering::Relaxed);
+        .store(endpoints.len(), Ordering::Relaxed);
     let staked_connection_table: Arc<Mutex<ConnectionTable>> =
         Arc::new(Mutex::new(ConnectionTable::new()));
     let (sender, receiver) = async_unbounded();
@@ -280,7 +328,7 @@ async fn run_server(
         coalesce,
     ));
 
-    let mut accepts = incoming
+    let mut accepts = endpoints
         .iter()
         .enumerate()
         .map(|(i, incoming)| {
@@ -290,13 +338,14 @@ async fn run_server(
             })
         })
         .collect::<FuturesUnordered<_>>();
+
     while !exit.load(Ordering::Relaxed) {
         let timeout_connection = select! {
             ready = accepts.next() => {
                 if let Some((connecting, i)) = ready {
                     accepts.push(
                         Box::pin(EndpointAccept {
-                            accept: incoming[i].accept(),
+                            accept: endpoints[i].accept(),
                             endpoint: i,
                         }
                     ));
@@ -316,11 +365,12 @@ async fn run_server(
             last_datapoint = Instant::now();
         }
 
-        if let Ok(Some(connection)) = timeout_connection {
+        if let Ok(Some(incoming)) = timeout_connection {
             stats
                 .total_incoming_connection_attempts
                 .fetch_add(1, Ordering::Relaxed);
-            let remote_address = connection.remote_address();
+
+            let remote_address = incoming.remote_address();
 
             // first check overall connection rate limit:
             if !overall_connection_rate_limiter.is_allowed() {
@@ -331,6 +381,7 @@ async fn run_server(
                 stats
                     .connection_rate_limited_across_all
                     .fetch_add(1, Ordering::Relaxed);
+                incoming.ignore();
                 continue;
             }
 
@@ -349,26 +400,46 @@ async fn run_server(
                 stats
                     .connection_rate_limited_per_ipaddr
                     .fetch_add(1, Ordering::Relaxed);
+                incoming.ignore();
                 continue;
             }
+
+            let Ok(client_connection_tracker) =
+                ClientConnectionTracker::new(stats.clone(), max_concurrent_connections)
+            else {
+                stats
+                    .refused_connections_too_many_open_connections
+                    .fetch_add(1, Ordering::Relaxed);
+                incoming.refuse();
+                continue;
+            };
 
             stats
                 .outstanding_incoming_connection_attempts
                 .fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(setup_connection(
-                connection,
-                unstaked_connection_table.clone(),
-                staked_connection_table.clone(),
-                sender.clone(),
-                max_connections_per_peer,
-                staked_nodes.clone(),
-                max_staked_connections,
-                max_unstaked_connections,
-                max_streams_per_ms,
-                stats.clone(),
-                wait_for_chunk_timeout,
-                stream_load_ema.clone(),
-            ));
+            let connecting = incoming.accept();
+            match connecting {
+                Ok(connecting) => {
+                    tokio::spawn(setup_connection(
+                        connecting,
+                        client_connection_tracker,
+                        unstaked_connection_table.clone(),
+                        staked_connection_table.clone(),
+                        sender.clone(),
+                        max_connections_per_peer,
+                        staked_nodes.clone(),
+                        max_staked_connections,
+                        max_unstaked_connections,
+                        max_streams_per_ms,
+                        stats.clone(),
+                        wait_for_chunk_timeout,
+                        stream_load_ema.clone(),
+                    ));
+                }
+                Err(err) => {
+                    debug!("Incoming::accept(): error {:?}", err);
+                }
+            }
         } else {
             debug!("accept(): Timed out waiting for connection");
         }
@@ -394,7 +465,7 @@ pub fn get_remote_pubkey(connection: &Connection) -> Option<Pubkey> {
     // Use the client cert only if it is self signed and the chain length is 1.
     connection
         .peer_identity()?
-        .downcast::<Vec<rustls::Certificate>>()
+        .downcast::<Vec<rustls::pki_types::CertificateDer>>()
         .ok()
         .filter(|certs| certs.len() == 1)?
         .first()
@@ -486,6 +557,7 @@ impl NewConnectionHandlerParams {
 }
 
 fn handle_and_cache_new_connection(
+    client_connection_tracker: ClientConnectionTracker,
     connection: Connection,
     mut connection_table_l: MutexGuard<ConnectionTable>,
     connection_table: Arc<Mutex<ConnectionTable>>,
@@ -515,6 +587,7 @@ fn handle_and_cache_new_connection(
             .try_add_connection(
                 ConnectionTableKey::new(remote_addr.ip(), params.remote_pubkey),
                 remote_addr.port(),
+                client_connection_tracker,
                 Some(connection.clone()),
                 params.peer_type,
                 timing::timestamp(),
@@ -561,6 +634,7 @@ fn handle_and_cache_new_connection(
 }
 
 async fn prune_unstaked_connections_and_add_new_connection(
+    client_connection_tracker: ClientConnectionTracker,
     connection: Connection,
     connection_table: Arc<Mutex<ConnectionTable>>,
     max_connections: usize,
@@ -574,6 +648,7 @@ async fn prune_unstaked_connections_and_add_new_connection(
         let mut connection_table = connection_table.lock().await;
         prune_unstaked_connection_table(&mut connection_table, max_connections, stats);
         handle_and_cache_new_connection(
+            client_connection_tracker,
             connection,
             connection_table,
             connection_table_clone,
@@ -636,6 +711,7 @@ fn compute_recieve_window(
 #[allow(clippy::too_many_arguments)]
 async fn setup_connection(
     connecting: Connecting,
+    client_connection_tracker: ClientConnectionTracker,
     unstaked_connection_table: Arc<Mutex<ConnectionTable>>,
     staked_connection_table: Arc<Mutex<ConnectionTable>>,
     packet_sender: AsyncSender<PacketAccumulator>,
@@ -702,6 +778,7 @@ async fn setup_connection(
 
                         if connection_table_l.total_size < max_staked_connections {
                             if let Ok(()) = handle_and_cache_new_connection(
+                                client_connection_tracker,
                                 new_connection,
                                 connection_table_l,
                                 staked_connection_table.clone(),
@@ -718,6 +795,7 @@ async fn setup_connection(
                             // put this connection in the unstaked connection table. If needed, prune a
                             // connection from the unstaked connection table.
                             if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                                client_connection_tracker,
                                 new_connection,
                                 unstaked_connection_table.clone(),
                                 max_unstaked_connections,
@@ -742,6 +820,7 @@ async fn setup_connection(
                     }
                     ConnectionPeerType::Unstaked => {
                         if let Ok(()) = prune_unstaked_connections_and_add_new_connection(
+                            client_connection_tracker,
                             new_connection,
                             unstaked_connection_table.clone(),
                             max_unstaked_connections,
@@ -1216,6 +1295,8 @@ struct ConnectionEntry {
     peer_type: ConnectionPeerType,
     last_update: Arc<AtomicU64>,
     port: u16,
+    // We do not explicitly use it, but its drop is triggered when ConnectionEntry is dropped.
+    _client_connection_tracker: ClientConnectionTracker,
     connection: Option<Connection>,
     stream_counter: Arc<ConnectionStreamCounter>,
 }
@@ -1226,6 +1307,7 @@ impl ConnectionEntry {
         peer_type: ConnectionPeerType,
         last_update: Arc<AtomicU64>,
         port: u16,
+        client_connection_tracker: ClientConnectionTracker,
         connection: Option<Connection>,
         stream_counter: Arc<ConnectionStreamCounter>,
     ) -> Self {
@@ -1234,6 +1316,7 @@ impl ConnectionEntry {
             peer_type,
             last_update,
             port,
+            _client_connection_tracker: client_connection_tracker,
             connection,
             stream_counter,
         }
@@ -1263,7 +1346,7 @@ impl Drop for ConnectionEntry {
     }
 }
 
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 enum ConnectionTableKey {
     IP(IpAddr),
     Pubkey(Pubkey),
@@ -1324,7 +1407,7 @@ impl ConnectionTable {
             })
             .map(|index| {
                 let connection = self.table[index].first();
-                let stake = connection.map(|connection| connection.stake());
+                let stake = connection.map(|connection: &ConnectionEntry| connection.stake());
                 (index, stake)
             })
             .take(sample_size)
@@ -1341,6 +1424,7 @@ impl ConnectionTable {
         &mut self,
         key: ConnectionTableKey,
         port: u16,
+        client_connection_tracker: ClientConnectionTracker,
         connection: Option<Connection>,
         peer_type: ConnectionPeerType,
         last_update: u64,
@@ -1368,6 +1452,7 @@ impl ConnectionTable {
                 peer_type,
                 last_update.clone(),
                 port,
+                client_connection_tracker,
                 connection,
                 stream_counter.clone(),
             ));
@@ -1422,7 +1507,7 @@ struct EndpointAccept<'a> {
 }
 
 impl<'a> Future for EndpointAccept<'a> {
-    type Output = (Option<quinn::Connecting>, usize);
+    type Output = (Option<quinn::Incoming>, usize);
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {
         let i = self.endpoint;
@@ -1463,7 +1548,7 @@ pub mod test {
         for i in 0..total {
             let mut s1 = conn1.open_uni().await.unwrap();
             s1.write_all(&[0u8]).await.unwrap();
-            s1.finish().await.unwrap();
+            s1.finish().unwrap();
             info!("done {}", i);
             sleep(Duration::from_millis(1000)).await;
         }
@@ -1488,15 +1573,12 @@ pub mod test {
         let s2 = conn2.open_uni().await;
         if let Ok(mut s2) = s2 {
             s1.write_all(&[0u8]).await.unwrap();
-            s1.finish().await.unwrap();
+            s1.finish().unwrap();
             // Send enough data to create more than 1 chunks.
             // The first will try to open the connection (which should fail).
             // The following chunks will enable the detection of connection failure.
             let data = vec![1u8; PACKET_DATA_SIZE * 2];
             s2.write_all(&data)
-                .await
-                .expect_err("shouldn't be able to open 2 connections");
-            s2.finish()
                 .await
                 .expect_err("shouldn't be able to open 2 connections");
         } else {
@@ -1521,9 +1603,9 @@ pub mod test {
             let mut s1 = c1.open_uni().await.unwrap();
             let mut s2 = c2.open_uni().await.unwrap();
             s1.write_all(&[0u8]).await.unwrap();
-            s1.finish().await.unwrap();
+            s1.finish().unwrap();
             s2.write_all(&[0u8]).await.unwrap();
-            s2.finish().await.unwrap();
+            s2.finish().unwrap();
             num_expected_packets += 2;
             sleep(Duration::from_millis(200)).await;
         }
@@ -1563,7 +1645,7 @@ pub mod test {
         for _ in 0..num_bytes {
             s1.write_all(&[0u8]).await.unwrap();
         }
-        s1.finish().await.unwrap();
+        s1.finish().unwrap();
 
         let mut all_packets = vec![];
         let now = Instant::now();
@@ -1598,7 +1680,8 @@ pub mod test {
                 // Ignoring any errors here. s1.finish() will test the error condition
                 s1.write_all(&[0u8]).await.unwrap_or_default();
             }
-            s1.finish().await.unwrap_err();
+            s1.finish().unwrap_or_default();
+            s1.stopped().await.unwrap_err();
         }
     }
 
@@ -1712,7 +1795,6 @@ pub mod test {
         // Test that more writes to the stream will fail (i.e. the stream is no longer writable
         // after the timeouts)
         assert!(s1.write_all(&[0u8]).await.is_err());
-        assert!(s1.finish().await.is_err());
 
         exit.store(true, Ordering::Relaxed);
         join_handle.await.unwrap();
@@ -1775,7 +1857,7 @@ pub mod test {
 
         let mut s1 = conn1.open_uni().await.unwrap();
         s1.write_all(&[0u8]).await.unwrap();
-        s1.finish().await.unwrap();
+        s1.finish().unwrap();
 
         let mut s2 = conn2.open_uni().await.unwrap();
         conn1.close(
@@ -1789,7 +1871,7 @@ pub mod test {
         assert_eq!(stats.connection_removed.load(Ordering::Relaxed), 1);
 
         s2.write_all(&[0u8]).await.unwrap();
-        s2.finish().await.unwrap();
+        s2.finish().unwrap();
 
         conn2.close(
             CONNECTION_CLOSE_CODE_DROPPED_ENTRY.into(),
@@ -1995,11 +2077,13 @@ pub mod test {
         let sockets: Vec<_> = (0..num_entries)
             .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(i, 0, 0, 0)), 0))
             .collect();
+        let stats = Arc::new(StreamerStats::default());
         for (i, socket) in sockets.iter().enumerate() {
             table
                 .try_add_connection(
                     ConnectionTableKey::IP(socket.ip()),
                     socket.port(),
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Unstaked,
                     i as u64,
@@ -2012,6 +2096,7 @@ pub mod test {
             .try_add_connection(
                 ConnectionTableKey::IP(sockets[0].ip()),
                 sockets[0].port(),
+                ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                 None,
                 ConnectionPeerType::Unstaked,
                 5,
@@ -2033,6 +2118,7 @@ pub mod test {
             table.remove_connection(ConnectionTableKey::IP(socket.ip()), socket.port(), 0);
         }
         assert_eq!(table.total_size, 0);
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2044,6 +2130,7 @@ pub mod test {
         // from a different peer pubkey.
         let num_entries = 15;
         let max_connections_per_peer = 10;
+        let stats = Arc::new(StreamerStats::default());
 
         let pubkeys: Vec<_> = (0..num_entries).map(|_| Pubkey::new_unique()).collect();
         for (i, pubkey) in pubkeys.iter().enumerate() {
@@ -2051,6 +2138,7 @@ pub mod test {
                 .try_add_connection(
                     ConnectionTableKey::Pubkey(*pubkey),
                     0,
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Unstaked,
                     i as u64,
@@ -2068,6 +2156,7 @@ pub mod test {
             table.remove_connection(ConnectionTableKey::Pubkey(*pubkey), 0, 0);
         }
         assert_eq!(table.total_size, 0);
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2077,11 +2166,14 @@ pub mod test {
 
         let max_connections_per_peer = 10;
         let pubkey = Pubkey::new_unique();
+        let stats: Arc<StreamerStats> = Arc::new(StreamerStats::default());
+
         (0..max_connections_per_peer).for_each(|i| {
             table
                 .try_add_connection(
                     ConnectionTableKey::Pubkey(pubkey),
                     0,
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Unstaked,
                     i as u64,
@@ -2096,6 +2188,7 @@ pub mod test {
             .try_add_connection(
                 ConnectionTableKey::Pubkey(pubkey),
                 0,
+                ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                 None,
                 ConnectionPeerType::Unstaked,
                 10,
@@ -2110,6 +2203,7 @@ pub mod test {
             .try_add_connection(
                 ConnectionTableKey::Pubkey(pubkey2),
                 0,
+                ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                 None,
                 ConnectionPeerType::Unstaked,
                 10,
@@ -2127,6 +2221,7 @@ pub mod test {
 
         table.remove_connection(ConnectionTableKey::Pubkey(pubkey2), 0, 0);
         assert_eq!(table.total_size, 0);
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2139,11 +2234,14 @@ pub mod test {
         let sockets: Vec<_> = (0..num_entries)
             .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(i, 0, 0, 0)), 0))
             .collect();
+        let stats: Arc<StreamerStats> = Arc::new(StreamerStats::default());
+
         for (i, socket) in sockets.iter().enumerate() {
             table
                 .try_add_connection(
                     ConnectionTableKey::IP(socket.ip()),
                     socket.port(),
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Staked((i + 1) as u64),
                     i as u64,
@@ -2164,6 +2262,8 @@ pub mod test {
             num_entries as u64 + 1, // threshold_stake
         );
         assert_eq!(pruned, 1);
+        // We had 5 connections and pruned 1, we should have 4 left
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 4);
     }
 
     #[test]
@@ -2176,11 +2276,14 @@ pub mod test {
         let mut sockets: Vec<_> = (0..num_ips)
             .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(i, 0, 0, 0)), 0))
             .collect();
+        let stats: Arc<StreamerStats> = Arc::new(StreamerStats::default());
+
         for (i, socket) in sockets.iter().enumerate() {
             table
                 .try_add_connection(
                     ConnectionTableKey::IP(socket.ip()),
                     socket.port(),
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Unstaked,
                     (i * 2) as u64,
@@ -2192,6 +2295,7 @@ pub mod test {
                 .try_add_connection(
                     ConnectionTableKey::IP(socket.ip()),
                     socket.port(),
+                    ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                     None,
                     ConnectionPeerType::Unstaked,
                     (i * 2 + 1) as u64,
@@ -2206,6 +2310,7 @@ pub mod test {
             .try_add_connection(
                 ConnectionTableKey::IP(single_connection_addr.ip()),
                 single_connection_addr.port(),
+                ClientConnectionTracker::new(stats.clone(), 1000).unwrap(),
                 None,
                 ConnectionPeerType::Unstaked,
                 (num_ips * 2) as u64,
@@ -2223,6 +2328,7 @@ pub mod test {
             table.remove_connection(ConnectionTableKey::IP(socket.ip()), socket.port(), 0);
         }
         assert_eq!(table.total_size, 0);
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2308,7 +2414,7 @@ pub mod test {
             let mut send_stream = client_connection.open_uni().await.unwrap();
             let data = format!("{i}").into_bytes();
             send_stream.write_all(&data).await.unwrap();
-            send_stream.finish().await.unwrap();
+            send_stream.finish().unwrap();
         }
         let elapsed_sending: f64 = start_time.elapsed().as_secs_f64();
         info!("Elapsed sending: {elapsed_sending}");
@@ -2334,5 +2440,17 @@ pub mod test {
             expected_num_txs
         );
         assert!(stats.throttled_unstaked_streams.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_client_connection_tracker() {
+        let stats = Arc::new(StreamerStats::default());
+        let tracker_1 = ClientConnectionTracker::new(stats.clone(), 1);
+        assert!(tracker_1.is_ok());
+        assert!(ClientConnectionTracker::new(stats.clone(), 1).is_err());
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 1);
+        // dropping the connection, concurrent connections should become 0
+        drop(tracker_1);
+        assert_eq!(stats.open_connections.load(Ordering::Relaxed), 0);
     }
 }

@@ -6,7 +6,7 @@
 
 extern crate alloc;
 use {
-    crate::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey},
+    crate::{account_info::AccountInfo, pubkey::Pubkey},
     alloc::vec::Vec,
     std::{
         alloc::Layout,
@@ -14,12 +14,10 @@ use {
         mem::{size_of, MaybeUninit},
         ptr::null_mut,
         rc::Rc,
-        result::Result as ResultGeneric,
         slice::{from_raw_parts, from_raw_parts_mut},
     },
 };
-
-pub type ProgramResult = ResultGeneric<(), ProgramError>;
+pub use {solana_account_info::MAX_PERMITTED_DATA_INCREASE, solana_program_error::ProgramResult};
 
 /// User implemented function to process an instruction
 ///
@@ -311,9 +309,6 @@ unsafe impl std::alloc::GlobalAlloc for BumpAllocator {
         // I'm a bump allocator, I don't free
     }
 }
-
-/// Maximum number of bytes a program may add to an account during a single realloc
-pub const MAX_PERMITTED_DATA_INCREASE: usize = 1_024 * 10;
 
 /// `assert_eq(std::mem::align_of::<u128>(), 8)` is true for BPF but not for some host machines
 pub const BPF_ALIGN_OF_U128: usize = 8;

@@ -19,8 +19,8 @@ use {
         account_storage::meta::StoredMetaWriteVersion,
         accounts::Accounts,
         accounts_db::{
-            AccountShrinkThreshold, AccountStorageEntry, AccountsDb, AccountsDbConfig,
-            AccountsFileId, AtomicAccountsFileId, BankHashStats, IndexGenerationInfo,
+            stats::BankHashStats, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
+            AccountsDbConfig, AccountsFileId, AtomicAccountsFileId, IndexGenerationInfo,
         },
         accounts_file::{AccountsFile, StorageAccess},
         accounts_hash::{AccountsDeltaHash, AccountsHash},
@@ -57,10 +57,12 @@ use {
         thread::Builder,
     },
     storage::SerializableStorage,
+    types::SerdeAccountsLtHash,
 };
 
 mod storage;
 mod tests;
+mod types;
 mod utils;
 
 pub(crate) use {
@@ -283,7 +285,7 @@ impl From<BankFieldsToSerialize> for SerializableVersionedBank {
     }
 }
 
-#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
+#[cfg(feature = "frozen-abi")]
 impl solana_frozen_abi::abi_example::TransparentAsHelper for SerializableVersionedBank {}
 
 /// Helper type to wrap BufReader streams when deserializing and reconstructing from either just a
@@ -400,6 +402,9 @@ struct ExtraFieldsToDeserialize {
     epoch_accounts_hash: Option<Hash>,
     #[serde(deserialize_with = "default_on_eof")]
     versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
+    #[serde(deserialize_with = "default_on_eof")]
+    #[allow(dead_code)]
+    accounts_lt_hash: Option<SerdeAccountsLtHash>,
 }
 
 /// Extra fields that are serialized at the end of snapshots.
@@ -441,6 +446,7 @@ where
         incremental_snapshot_persistence,
         epoch_accounts_hash,
         versioned_epoch_stakes,
+        accounts_lt_hash: _,
     } = extra_fields;
 
     bank_fields.fee_rate_governor = bank_fields
@@ -817,7 +823,7 @@ impl<'a> Serialize for SerializableAccountsDb<'a> {
     }
 }
 
-#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
+#[cfg(feature = "frozen-abi")]
 impl<'a> solana_frozen_abi::abi_example::TransparentAsHelper for SerializableAccountsDb<'a> {}
 
 #[allow(clippy::too_many_arguments)]

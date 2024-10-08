@@ -1416,7 +1416,7 @@ mod tests {
     const TICKS_PER_SLOT: u64 = 2;
     const TOTAL_VALIDATOR_COUNT: u16 = 20;
     const MY_INDEX: usize = TOTAL_VALIDATOR_COUNT as usize - 1;
-    const LEADER_INDEX: usize = 0;
+    const COORDINATOR_INDEX: usize = 0;
     const WAIT_FOR_THREAD_TIMEOUT: u64 = 10_000;
     const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
     const NON_CONFORMING_VALIDATOR_PERCENT: u64 = 5;
@@ -1524,6 +1524,9 @@ mod tests {
                 .node_keypair
                 .insecure_clone(),
         );
+        let wen_restart_coordinator = validator_voting_keypairs[COORDINATOR_INDEX]
+            .node_keypair
+            .pubkey();
         let cluster_info = Arc::new(ClusterInfo::new(
             {
                 let mut contact_info =
@@ -1578,7 +1581,7 @@ mod tests {
         let mut wen_restart_proto_path = ledger_path.path().to_path_buf();
         wen_restart_proto_path.push("wen_restart_status.proto");
         let _ = remove_file(&wen_restart_proto_path);
-        let wen_restart_coordinator = validator_voting_keypairs[LEADER_INDEX]
+        let wen_restart_coordinator = validator_voting_keypairs[COORDINATOR_INDEX]
             .node_keypair
             .pubkey();
         WenRestartTestInitResult {
@@ -1848,7 +1851,7 @@ mod tests {
         let my_pubkey = test_state.validator_voting_keypairs[MY_INDEX]
             .node_keypair
             .pubkey();
-        let coordinator_pubkey = test_state.validator_voting_keypairs[LEADER_INDEX]
+        let coordinator_pubkey = test_state.validator_voting_keypairs[COORDINATOR_INDEX]
             .node_keypair
             .pubkey();
         assert_eq!(

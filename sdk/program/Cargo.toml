@@ -13,9 +13,9 @@ rust-version = "1.79.0"                          # solana platform-tools rust ve
 
 [dependencies]
 bincode = { workspace = true }
-blake3 = { workspace = true, features = ["digest", "traits-preview"] }
+blake3 = { workspace = true, features = ["traits-preview"] }
 borsh = { workspace = true, optional = true }
-borsh0-10 = { package = "borsh", version = "0.10.3", optional = true }
+borsh0-10 = { workspace = true, optional = true }
 bs58 = { workspace = true, features = ["alloc"] }
 bv = { workspace = true, features = ["serde"] }
 bytemuck = { workspace = true }
@@ -31,6 +31,7 @@ serde_bytes = { workspace = true }
 serde_derive = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }
+solana-account-info = { workspace = true, features = ["bincode"] }
 solana-atomic-u64 = { workspace = true }
 solana-clock = { workspace = true, features = ["serde"] }
 solana-decode-error = { workspace = true }
@@ -41,14 +42,23 @@ solana-hash = { workspace = true, features = [
     "serde",
     "std",
 ] }
+solana-instruction = { workspace = true, default-features = false, features = [
+    "bincode",
+    "serde",
+    "std",
+] }
 solana-msg = { workspace = true }
+solana-program-error = { workspace = true, features = ["serde"] }
 solana-program-memory = { workspace = true }
 solana-program-option = { workspace = true }
+solana-program-pack = { workspace = true }
 solana-pubkey = { workspace = true, features = ["bytemuck", "curve25519", "serde", "std"] }
+solana-rent = { workspace = true, features = ["serde"] }
 solana-sanitize = { workspace = true }
 solana-sdk-macro = { workspace = true }
 solana-secp256k1-recover = { workspace = true }
 solana-serde-varint = { workspace = true }
+solana-serialize-utils = { workspace = true }
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-short-vec = { workspace = true }
 thiserror = { workspace = true }
@@ -96,9 +106,6 @@ solana-pubkey = { workspace = true, features = ["dev-context-only-utils"] }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
 
-[build-dependencies]
-rustc_version = { workspace = true, optional = true }
-
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 
@@ -107,14 +114,22 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["borsh"]
-borsh = ["dep:borsh", "dep:borsh0-10", "solana-hash/borsh", "solana-pubkey/borsh"]
+borsh = [
+    "dep:borsh",
+    "dep:borsh0-10",
+    "solana-hash/borsh",
+    "solana-instruction/borsh",
+    "solana-program-error/borsh",
+    "solana-pubkey/borsh"
+]
 dev-context-only-utils = ["dep:qualifier_attr"]
 frozen-abi = [
-    "dep:rustc_version",
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
     "solana-hash/frozen-abi",
+    "solana-instruction/frozen-abi",
     "solana-pubkey/frozen-abi",
+    "solana-rent/frozen-abi",
     "solana-short-vec/frozen-abi"
 ]
 

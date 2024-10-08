@@ -21,6 +21,7 @@ use {
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput},
         transaction_batch::TransactionBatch,
+        verify_precompiles::verify_precompiles,
     },
     solana_runtime_transaction::instructions_processor::process_compute_budget_instructions,
     solana_sdk::{
@@ -401,7 +402,7 @@ impl Consumer {
             .map(|(tx, result)| match result {
                 Ok(_) => {
                     if !move_precompile_verification_to_svm {
-                        tx.verify_precompiles(&bank.feature_set)
+                        verify_precompiles(tx, &bank.feature_set)
                     } else {
                         Ok(())
                     }
@@ -452,7 +453,7 @@ impl Consumer {
             } else {
                 // Verify pre-compiles.
                 if !move_precompile_verification_to_svm {
-                    tx.verify_precompiles(&bank.feature_set)?;
+                    verify_precompiles(tx, &bank.feature_set)?;
                 }
 
                 // Any transaction executed between sanitization time and now may have closed the lookup table(s).
@@ -550,7 +551,7 @@ impl Consumer {
     fn execute_and_commit_transactions_locked(
         &self,
         bank: &Arc<Bank>,
-        batch: &TransactionBatch,
+        batch: &TransactionBatch<SanitizedTransaction>,
     ) -> ExecuteAndCommitTransactionsOutput {
         let transaction_status_sender_enabled = self.committer.transaction_status_sender_enabled();
         let mut execute_and_commit_timings = LeaderExecuteAndCommitTimings::default();

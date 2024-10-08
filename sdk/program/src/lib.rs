@@ -248,7 +248,7 @@
 //!   language-independent serialization format. It is not generally recommended
 //!   for new code.
 //!
-//!   [`Pack`]: program_pack::Pack
+//!   [`Pack`]: https://docs.rs/solana-program-pack/latest/trait.Pack.html
 //!
 //! Developers should carefully consider the CPU cost of serialization, balanced
 //! against the need for correctness and ease of use: off-the-shelf
@@ -464,12 +464,11 @@
 //! [lut]: https://docs.solanalabs.com/proposals/versioned-transactions
 
 #![allow(incomplete_features)]
-#![cfg_attr(RUSTC_WITH_SPECIALIZATION, feature(specialization))]
+#![cfg_attr(feature = "frozen-abi", feature(specialization))]
 
 // Allows macro expansion of `use ::solana_program::*` to work within this crate
 extern crate self as solana_program;
 
-pub mod account_info;
 pub mod address_lookup_table;
 pub mod big_mod_exp;
 pub mod blake3;
@@ -483,7 +482,6 @@ pub mod bpf_loader;
 pub mod bpf_loader_deprecated;
 pub mod bpf_loader_upgradeable;
 pub mod compute_units;
-pub mod debug_account_data;
 pub mod ed25519_program;
 pub mod entrypoint;
 pub mod entrypoint_deprecated;
@@ -508,12 +506,9 @@ pub mod native_token;
 pub mod nonce;
 pub mod program;
 pub mod program_error;
-pub mod program_pack;
 pub mod program_stubs;
 pub mod program_utils;
-pub mod rent;
 pub mod secp256k1_program;
-pub mod serialize_utils;
 pub mod slot_hashes;
 pub mod slot_history;
 pub mod stable_layout;
@@ -528,19 +523,25 @@ pub mod wasm;
 
 #[deprecated(since = "2.1.0", note = "Use `solana-program-memory` crate instead")]
 pub use solana_program_memory as program_memory;
+#[deprecated(since = "2.1.0", note = "Use `solana-program-pack` crate instead")]
+pub use solana_program_pack as program_pack;
 #[deprecated(since = "2.1.0", note = "Use `solana-sanitize` crate instead")]
 pub use solana_sanitize as sanitize;
 #[deprecated(since = "2.1.0", note = "Use `solana-secp256k1-recover` crate instead")]
 pub use solana_secp256k1_recover as secp256k1_recover;
 #[deprecated(since = "2.1.0", note = "Use `solana-serde-varint` crate instead")]
 pub use solana_serde_varint as serde_varint;
+#[deprecated(since = "2.1.0", note = "Use `solana-serialize-utils` crate instead")]
+pub use solana_serialize_utils as serialize_utils;
 #[deprecated(since = "2.1.0", note = "Use `solana-short-vec` crate instead")]
 pub use solana_short_vec as short_vec;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen::prelude::wasm_bindgen;
 pub use {
-    solana_clock as clock, solana_msg::msg, solana_program_option as program_option,
-    solana_pubkey as pubkey,
+    solana_account_info::{self as account_info, debug_account_data},
+    solana_clock as clock,
+    solana_msg::msg,
+    solana_program_option as program_option, solana_pubkey as pubkey, solana_rent as rent,
 };
 
 /// The [config native program][np].
