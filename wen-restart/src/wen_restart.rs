@@ -1007,6 +1007,10 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     config
                         .cluster_info
                         .push_restart_heaviest_fork(new_root_slot, new_root_hash, 0);
+                    WenRestartProgressInternalState::HeaviestFork {
+                        new_root_slot,
+                        new_root_hash,
+                    }    
                 } else {
                     let (coordinator_slot, coordinator_hash) = receive_restart_heaviest_fork(
                         config.wen_restart_coordinator,
@@ -1037,10 +1041,10 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                             return Err(e);
                         }
                     }
-                }
-                WenRestartProgressInternalState::HeaviestFork {
-                    new_root_slot,
-                    new_root_hash,
+                    WenRestartProgressInternalState::HeaviestFork {
+                        new_root_slot: coordinator_slot,
+                        new_root_hash: coordinator_hash,
+                    }    
                 }
             }
             WenRestartProgressInternalState::GenerateSnapshot {
