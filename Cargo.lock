@@ -1163,9 +1163,9 @@ dependencies = [
 
 [[package]]
 name = "bytemuck_derive"
-version = "1.7.1"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc8b54b395f2fcfbb3d90c47b01c7f444d94d05bdeb775811dec868ac3bbc26"
+checksum = "bcfcc3cd946cb52f0bbfdbbcfa2f4e24f75ebb6c0e1002f7c25904fada18b9ec"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4375,9 +4375,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.86"
+version = "1.0.87"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e719e8df665df0d1c8fbfd238015744736151d4445ec0836b8e628aae103b77"
+checksum = "b3e4daa0dcf6feba26f985457cdf104d4b4256fc5a09547140f3631bb076b19a"
 dependencies = [
  "unicode-ident",
 ]
@@ -4525,7 +4525,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rustc-hash 2.0.0",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "socket2 0.5.7",
  "thiserror",
  "tokio",
@@ -4542,7 +4542,7 @@ dependencies = [
  "rand 0.8.5",
  "ring 0.17.3",
  "rustc-hash 2.0.0",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-platform-verifier",
  "slab",
  "thiserror",
@@ -5027,9 +5027,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.13"
+version = "0.23.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2dabaac7466917e566adb06783a81ca48944c6898a1b08b9374106dd671f4c8"
+checksum = "415d9944693cb90382053259f89fbb077ea730ad7273047ec63b19bc9b160ba8"
 dependencies = [
  "once_cell",
  "ring 0.17.3",
@@ -5073,9 +5073,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0a2ce646f8655401bb81e7927b812614bd5d91dbc968696be50603510fcaf0"
+checksum = "0e696e35370c65c9c541198af4543ccd580cf17fc25d8e05c5a242b202488c55"
 
 [[package]]
 name = "rustls-platform-verifier"
@@ -5088,7 +5088,7 @@ dependencies = [
  "jni",
  "log",
  "once_cell",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "rustls-native-certs",
  "rustls-platform-verifier-android",
  "rustls-webpki 0.102.8",
@@ -5626,6 +5626,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "solana-account"
+version = "2.1.0"
+dependencies = [
+ "bincode",
+ "qualifier_attr",
+ "serde",
+ "serde_bytes",
+ "serde_derive",
+ "solana-account",
+ "solana-frozen-abi",
+ "solana-frozen-abi-macro",
+ "solana-logger",
+ "solana-program",
+]
+
+[[package]]
 name = "solana-account-decoder"
 version = "2.1.0"
 dependencies = [
@@ -5930,6 +5946,16 @@ dependencies = [
  "spl-instruction-padding",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "solana-bincode"
+version = "2.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "solana-instruction",
+ "solana-program",
 ]
 
 [[package]]
@@ -6376,7 +6402,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rayon",
  "rolling-file",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "serde",
  "serde_bytes",
  "serde_derive",
@@ -7236,6 +7262,7 @@ dependencies = [
  "sha3",
  "solana-account-info",
  "solana-atomic-u64",
+ "solana-bincode",
  "solana-clock",
  "solana-decode-error",
  "solana-define-syscall",
@@ -7435,7 +7462,7 @@ dependencies = [
  "log",
  "quinn",
  "quinn-proto",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "solana-connection-cache",
  "solana-logger",
  "solana-measure",
@@ -7814,6 +7841,7 @@ dependencies = [
  "sha2 0.10.8",
  "sha3",
  "siphasher",
+ "solana-account",
  "solana-bn254",
  "solana-decode-error",
  "solana-derivation-path",
@@ -8063,7 +8091,7 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.8.5",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "smallvec",
  "socket2 0.5.7",
  "solana-logger",
@@ -8434,7 +8462,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rayon",
- "rustls 0.23.13",
+ "rustls 0.23.14",
  "solana-entry",
  "solana-feature-set",
  "solana-geyser-plugin-manager",
