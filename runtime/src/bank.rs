@@ -424,7 +424,9 @@ pub struct BankFieldsToDeserialize {
     pub(crate) blockhash_queue: BlockhashQueue,
     pub(crate) ancestors: AncestorsForSerialization,
     pub(crate) hash: Hash,
+    pub(crate) vote_only_hash: Hash,
     pub(crate) parent_hash: Hash,
+    pub(crate) parent_vote_only_hash: Hash,
     pub(crate) parent_slot: Slot,
     pub(crate) hard_forks: HardForks,
     pub(crate) transaction_count: u64,
@@ -468,7 +470,9 @@ pub struct BankFieldsToSerialize {
     pub blockhash_queue: BlockhashQueue,
     pub ancestors: AncestorsForSerialization,
     pub hash: Hash,
+    pub vote_only_hash: Hash,
     pub parent_hash: Hash,
+    pub parent_vote_only_hash: Hash,
     pub parent_slot: Slot,
     pub hard_forks: HardForks,
     pub transaction_count: u64,
@@ -514,7 +518,9 @@ impl PartialEq for Bank {
             blockhash_queue,
             ancestors,
             hash,
+            vote_only_hash,
             parent_hash,
+            parent_vote_only_hash,
             parent_slot,
             hard_forks,
             transaction_count,
@@ -578,7 +584,9 @@ impl PartialEq for Bank {
         *blockhash_queue.read().unwrap() == *other.blockhash_queue.read().unwrap()
             && ancestors == &other.ancestors
             && *hash.read().unwrap() == *other.hash.read().unwrap()
+            && *vote_only_hash.read().unwrap() == *other.vote_only_hash.read().unwrap()
             && parent_hash == &other.parent_hash
+            && parent_vote_only_hash == &other.parent_vote_only_hash
             && parent_slot == &other.parent_slot
             && *hard_forks.read().unwrap() == *other.hard_forks.read().unwrap()
             && transaction_count.load(Relaxed) == other.transaction_count.load(Relaxed)
@@ -620,7 +628,9 @@ impl BankFieldsToSerialize {
             blockhash_queue: BlockhashQueue::default(),
             ancestors: AncestorsForSerialization::default(),
             hash: Hash::default(),
+            vote_only_hash: Hash::default(),
             parent_hash: Hash::default(),
+            parent_vote_only_hash: Hash::default(),
             parent_slot: Slot::default(),
             hard_forks: HardForks::default(),
             transaction_count: u64::default(),
@@ -738,8 +748,15 @@ pub struct Bank {
     /// Hash of this Bank's state. Only meaningful after freezing.
     hash: RwLock<Hash>,
 
+    /// Vote only hash which is result of all votes and block-id.
+    /// Only meaningful after vote-only-freezing.
+    vote_only_hash: RwLock<Hash>,
+
     /// Hash of this Bank's parent's state
     parent_hash: Hash,
+
+    /// Parent's vote only hash.
+    parent_vote_only_hash: Hash,
 
     /// parent's slot
     parent_slot: Slot,
@@ -964,7 +981,9 @@ impl Bank {
             blockhash_queue: RwLock::<BlockhashQueue>::default(),
             ancestors: Ancestors::default(),
             hash: RwLock::<Hash>::default(),
+            vote_only_hash: RwLock::<Hash>::default(),
             parent_hash: Hash::default(),
+            parent_vote_only_hash: Hash::default(),
             parent_slot: Slot::default(),
             hard_forks: Arc::<RwLock<HardForks>>::default(),
             transaction_count: AtomicU64::default(),
@@ -1234,11 +1253,13 @@ impl Bank {
             stakes_cache,
             epoch_stakes,
             parent_hash: parent.hash(),
+            parent_vote_only_hash: parent.vote_only_hash(),
             parent_slot: parent.slot(),
             collector_id: *collector_id,
             collector_fees: AtomicU64::new(0),
             ancestors: Ancestors::default(),
             hash: RwLock::new(Hash::default()),
+            vote_only_hash: RwLock::new(Hash::default()),
             is_delta: AtomicBool::new(false),
             tick_height: AtomicU64::new(parent.tick_height.load(Relaxed)),
             signature_count: AtomicU64::new(0),
@@ -1594,7 +1615,9 @@ impl Bank {
             blockhash_queue: RwLock::new(fields.blockhash_queue),
             ancestors,
             hash: RwLock::new(fields.hash),
+            vote_only_hash: RwLock::new(fields.vote_only_hash),
             parent_hash: fields.parent_hash,
+            parent_vote_only_hash: fields.parent_vote_only_hash,
             parent_slot: fields.parent_slot,
             hard_forks: Arc::new(RwLock::new(fields.hard_forks)),
             transaction_count: AtomicU64::new(fields.transaction_count),
@@ -1728,7 +1751,9 @@ impl Bank {
             blockhash_queue: self.blockhash_queue.read().unwrap().clone(),
             ancestors: AncestorsForSerialization::from(&self.ancestors),
             hash: *self.hash.read().unwrap(),
+            vote_only_hash: *self.vote_only_hash.read().unwrap(),
             parent_hash: self.parent_hash,
+            parent_vote_only_hash: self.parent_vote_only_hash,
             parent_slot: self.parent_slot,
             hard_forks: self.hard_forks.read().unwrap().clone(),
             transaction_count: self.transaction_count.load(Relaxed),
@@ -1787,12 +1812,24 @@ impl Bank {
         self.hash.read().unwrap()
     }
 
+    pub fn vote_only_freeze_lock(&self) -> RwLockReadGuard<Hash> {
+        self.vote_only_hash.read().unwrap()
+    }
+
     pub fn hash(&self) -> Hash {
         *self.hash.read().unwrap()
     }
 
+    pub fn vote_only_hash(&self) -> Hash {
+        *self.vote_only_hash.read().unwrap()
+    }
+
     pub fn is_frozen(&self) -> bool {
         *self.hash.read().unwrap() != Hash::default()
+    }
+
+    pub fn is_vote_only_frozen(&self) -> bool {
+        *self.vote_only_hash.read().unwrap() != Hash::default()
     }
 
     pub fn freeze_started(&self) -> bool {
@@ -2000,7 +2037,7 @@ impl Bank {
                 .as_ref()
                 .map(|account| from_account::<SlotHashes, _>(account).unwrap())
                 .unwrap_or_default();
-            slot_hashes.add(self.parent_slot, self.parent_hash);
+            slot_hashes.add(self.parent_slot, self.parent_vote_only_hash);
             create_account(
                 &slot_hashes,
                 self.inherit_specially_retained_account_fields(account),
@@ -2848,6 +2885,13 @@ impl Bank {
         }
     }
 
+    pub fn vote_only_freeze(&self) {
+        let mut hash = self.vote_only_hash.write().unwrap();
+        if *hash == Hash::default() {
+            *hash = self.vote_only_hash_internal_state();
+        }
+    }
+
     // dangerous; don't use this; this is only needed for ledger-tool's special command
     pub fn unfreeze_for_ledger_tool(&self) {
         self.freeze_started.store(false, Relaxed);
@@ -2912,6 +2956,10 @@ impl Bank {
 
     pub fn parent_hash(&self) -> Hash {
         self.parent_hash
+    }
+
+    pub fn parent_vote_only_hash(&self) -> Hash {
+        self.parent_vote_only_hash
     }
 
     fn process_genesis_config(
@@ -5340,6 +5388,88 @@ impl Bank {
             .calculate_accounts_delta_hash_internal(
                 slot,
                 ignore,
+                self.skipped_rewrites.lock().unwrap().clone(),
+            );
+
+        let mut signature_count_buf = [0u8; 8];
+        LittleEndian::write_u64(&mut signature_count_buf[..], self.signature_count());
+
+        let mut hash = hashv(&[
+            self.parent_hash.as_ref(),
+            accounts_delta_hash.0.as_ref(),
+            &signature_count_buf,
+            self.last_blockhash().as_ref(),
+        ]);
+
+        let epoch_accounts_hash = self.wait_get_epoch_accounts_hash();
+        if let Some(epoch_accounts_hash) = epoch_accounts_hash {
+            hash = hashv(&[hash.as_ref(), epoch_accounts_hash.as_ref().as_ref()]);
+        };
+
+        let buf = self
+            .hard_forks
+            .read()
+            .unwrap()
+            .get_hash_data(slot, self.parent_slot());
+        if let Some(buf) = buf {
+            let hard_forked_hash = extend_and_hash(&hash, &buf);
+            warn!("hard fork at slot {slot} by hashing {buf:?}: {hash} => {hard_forked_hash}");
+            hash = hard_forked_hash;
+        }
+
+        #[cfg(feature = "dev-context-only-utils")]
+        let hash_override = self
+            .hash_overrides
+            .lock()
+            .unwrap()
+            .get_bank_hash_override(slot)
+            .copied()
+            .inspect(|&hash_override| {
+                if hash_override != hash {
+                    info!(
+                        "bank: slot: {}: overrode bank hash: {} with {}",
+                        self.slot(),
+                        hash,
+                        hash_override
+                    );
+                }
+            });
+        // Avoid to optimize out `hash` along with the whole computation by super smart rustc.
+        // hash_override is used by ledger-tool's simulate-block-production, which prefers
+        // the actual bank freezing processing for accurate simulation.
+        #[cfg(feature = "dev-context-only-utils")]
+        let hash = hash_override.unwrap_or(std::hint::black_box(hash));
+
+        let bank_hash_stats = self
+            .rc
+            .accounts
+            .accounts_db
+            .get_bank_hash_stats(slot)
+            .expect("No bank hash stats were found for this bank, that should not be possible");
+        info!(
+            "bank frozen: {slot} hash: {hash} accounts_delta: {} signature_count: {} last_blockhash: {} capitalization: {}{}, stats: {bank_hash_stats:?}",
+            accounts_delta_hash.0,
+            self.signature_count(),
+            self.last_blockhash(),
+            self.capitalization(),
+            if let Some(epoch_accounts_hash) = epoch_accounts_hash {
+                format!(", epoch_accounts_hash: {:?}", epoch_accounts_hash.as_ref())
+            } else {
+                "".to_string()
+            }
+        );
+        hash
+    }
+
+    fn vote_only_hash_internal_state(&self) -> Hash {
+        let slot = self.slot();
+        let accounts_delta_hash = self
+            .rc
+            .accounts
+            .accounts_db
+            .calculate_accounts_delta_hash_internal(
+                slot,
+                None,
                 self.skipped_rewrites.lock().unwrap().clone(),
             );
 

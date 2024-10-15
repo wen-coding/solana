@@ -176,7 +176,9 @@ pub fn parse_vote(
             let tower_sync = json!({
                 "lockouts": tower_sync.lockouts,
                 "root": tower_sync.root,
-                "hash": tower_sync.hash.to_string(),
+                "hash": tower_sync.vote_only_hash.to_string(),
+                "replay_tip_slot": tower_sync.replay_tip_slot,
+                "replay_tip_hash": tower_sync.replay_tip_hash.to_string(),
                 "timestamp": tower_sync.timestamp,
                 "blockId": tower_sync.block_id.to_string(),
             });
@@ -194,7 +196,9 @@ pub fn parse_vote(
             let tower_sync = json!({
                 "lockouts": tower_sync.lockouts,
                 "root": tower_sync.root,
-                "hash": tower_sync.hash.to_string(),
+                "hash": tower_sync.vote_only_hash.to_string(),
+                "replay_tip_slot": tower_sync.replay_tip_slot,
+                "replay_tip_hash": tower_sync.replay_tip_hash.to_string(),
                 "timestamp": tower_sync.timestamp,
                 "blockId": tower_sync.block_id.to_string(),
             });

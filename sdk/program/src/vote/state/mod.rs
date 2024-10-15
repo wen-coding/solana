@@ -65,14 +65,18 @@ pub struct Vote {
     pub hash: Hash,
     /// processing timestamp of last slot
     pub timestamp: Option<UnixTimestamp>,
+    pub replay_tip_slot: Slot,
+    pub replay_tip_hash: Hash,
 }
 
 impl Vote {
-    pub fn new(slots: Vec<Slot>, hash: Hash) -> Self {
+    pub fn new(slots: Vec<Slot>, hash: Hash, replay_tip_slot: Slot, replay_tip_hash: Hash) -> Self {
         Self {
             slots,
             hash,
             timestamp: None,
+            replay_tip_slot,
+            replay_tip_hash,
         }
     }
 
@@ -230,8 +234,10 @@ pub struct TowerSync {
     pub lockouts: VecDeque<Lockout>,
     /// The proposed root
     pub root: Option<Slot>,
+    pub vote_only_hash: Hash,
+    pub replay_tip_slot: Slot,
     /// signature of the bank's state at the last slot
-    pub hash: Hash,
+    pub replay_tip_hash: Hash,
     /// processing timestamp of last slot
     pub timestamp: Option<UnixTimestamp>,
     /// the unique identifier for the chain up to and
@@ -251,7 +257,9 @@ impl From<Vec<(Slot, u32)>> for TowerSync {
         Self {
             lockouts,
             root: None,
-            hash: Hash::default(),
+            vote_only_hash: Hash::default(),
+            replay_tip_hash: Hash::default(),
+            replay_tip_slot: 0,
             timestamp: None,
             block_id: Hash::default(),
         }
@@ -262,13 +270,17 @@ impl TowerSync {
     pub fn new(
         lockouts: VecDeque<Lockout>,
         root: Option<Slot>,
-        hash: Hash,
+        vote_only_hash: Hash,
+        replay_tip_slot: Slot,
+        replay_tip_hash: Hash,
         block_id: Hash,
     ) -> Self {
         Self {
             lockouts,
             root,
-            hash,
+            vote_only_hash,
+            replay_tip_slot,
+            replay_tip_hash,
             timestamp: None,
             block_id,
         }
@@ -285,12 +297,14 @@ impl TowerSync {
         Self::new_from_slots(
             slots,
             hash,
+            slot,
+            hash,
             (lowest_slot > 0).then(|| lowest_slot.saturating_sub(1)),
         )
     }
 
     /// Creates a tower with consecutive confirmation for `slots`
-    pub fn new_from_slots(slots: Vec<Slot>, hash: Hash, root: Option<Slot>) -> Self {
+    pub fn new_from_slots(slots: Vec<Slot>, vote_only_hash: Hash, replay_tip_slot: Slot, replay_tip_hash: Hash, root: Option<Slot>) -> Self {
         let lockouts: VecDeque<Lockout> = slots
             .into_iter()
             .rev()
@@ -300,7 +314,9 @@ impl TowerSync {
             .collect();
         Self {
             lockouts,
-            hash,
+            vote_only_hash,
+            replay_tip_hash,
+            replay_tip_slot,
             root,
             timestamp: None,
             block_id: Hash::default(),
@@ -441,6 +457,8 @@ pub struct VoteState {
 
     /// most recent timestamp submitted with a vote
     pub last_timestamp: BlockTimestamp,
+
+    pub replay_tip_slot: Slot,
 }
 
 impl VoteState {
@@ -1090,7 +1108,9 @@ pub mod serde_tower_sync {
         root: Slot,
         #[serde(with = "short_vec")]
         lockout_offsets: Vec<LockoutOffset>,
-        hash: Hash,
+        vote_only_hash: Hash,
+        replay_tip_slot: Slot,
+        replay_tip_hash: Hash,
         timestamp: Option<UnixTimestamp>,
         block_id: Hash,
     }
@@ -1119,7 +1139,9 @@ pub mod serde_tower_sync {
         let compact_tower_sync = CompactTowerSync {
             root: tower_sync.root.unwrap_or(Slot::MAX),
             lockout_offsets: lockout_offsets.collect::<Result<_, _>>()?,
-            hash: tower_sync.hash,
+            replay_tip_hash: tower_sync.replay_tip_hash,
+            replay_tip_slot: tower_sync.replay_tip_slot,
+            vote_only_hash: tower_sync.vote_only_hash,
             timestamp: tower_sync.timestamp,
             block_id: tower_sync.block_id,
         };
@@ -1133,7 +1155,9 @@ pub mod serde_tower_sync {
         let CompactTowerSync {
             root,
             lockout_offsets,
-            hash,
+            vote_only_hash,
+            replay_tip_slot,
+            replay_tip_hash,
             timestamp,
             block_id,
         } = CompactTowerSync::deserialize(deserializer)?;
@@ -1157,7 +1181,9 @@ pub mod serde_tower_sync {
         Ok(TowerSync {
             root,
             lockouts: lockouts.collect::<Result<_, _>>()?,
-            hash,
+            vote_only_hash,
+            replay_tip_hash,
+            replay_tip_slot,
             timestamp,
             block_id,
         })

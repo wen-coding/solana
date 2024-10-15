@@ -593,6 +593,8 @@ impl Tower {
         self.record_bank_vote_and_update_lockouts(
             bank.slot(),
             bank.hash(),
+            bank.slot(),
+            bank.hash(),
             bank.feature_set
                 .is_active(&solana_feature_set::enable_tower_sync_ix::id()),
         )
@@ -603,6 +605,7 @@ impl Tower {
     pub(crate) fn update_last_vote_from_vote_state(
         &mut self,
         vote_hash: Hash,
+        replay_tip_hash: Hash,
         enable_tower_sync_ix: bool,
     ) {
         let mut new_vote = if enable_tower_sync_ix {
@@ -614,6 +617,8 @@ impl Tower {
                     .collect(),
                 self.vote_state.root_slot,
                 vote_hash,
+                self.vote_state.replay_tip_slot,
+                replay_tip_hash,
                 Hash::default(), // TODO: block_id will fill in upcoming pr
             ))
         } else {
@@ -636,12 +641,14 @@ impl Tower {
         &mut self,
         vote_slot: Slot,
         vote_hash: Hash,
+        replay_tip_slot: Slot,
+        replay_tip_hash: Hash,
         enable_tower_sync_ix: bool,
     ) -> Option<Slot> {
         trace!("{} record_vote for {}", self.node_pubkey, vote_slot);
         let old_root = self.root();
 
-        let vote = Vote::new(vec![vote_slot], vote_hash);
+        let vote = Vote::new(vec![vote_slot], vote_hash, replay_tip_slot, replay_tip_hash);
         let result = process_vote_unchecked(&mut self.vote_state, vote);
         if result.is_err() {
             panic!(
@@ -649,7 +656,7 @@ impl Tower {
                 vote_slot, vote_hash, result
             );
         }
-        self.update_last_vote_from_vote_state(vote_hash, enable_tower_sync_ix);
+        self.update_last_vote_from_vote_state(vote_hash, replay_tip_hash, enable_tower_sync_ix);
 
         let new_root = self.root();
 
@@ -667,7 +674,7 @@ impl Tower {
 
     #[cfg(feature = "dev-context-only-utils")]
     pub fn record_vote(&mut self, slot: Slot, hash: Hash) -> Option<Slot> {
-        self.record_bank_vote_and_update_lockouts(slot, hash, true)
+        self.record_bank_vote_and_update_lockouts(slot, hash, slot, hash, true)
     }
 
     /// Used for tests

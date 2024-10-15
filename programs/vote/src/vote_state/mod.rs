@@ -90,7 +90,7 @@ impl VoteTransaction {
             VoteTransaction::Vote(vote) => vote.hash,
             VoteTransaction::VoteStateUpdate(vote_state_update) => vote_state_update.hash,
             VoteTransaction::CompactVoteStateUpdate(vote_state_update) => vote_state_update.hash,
-            VoteTransaction::TowerSync(tower_sync) => tower_sync.hash,
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.vote_only_hash,
         }
     }
 
@@ -814,7 +814,7 @@ pub fn process_slot_votes_unchecked(vote_state: &mut VoteState, slots: &[Slot]) 
 }
 
 pub fn process_slot_vote_unchecked(vote_state: &mut VoteState, slot: Slot) {
-    let _ = process_vote_unchecked(vote_state, Vote::new(vec![slot], Hash::default()));
+    let _ = process_vote_unchecked(vote_state, Vote::new(vec![slot], Hash::default(), slot, Hash::default()));
 }
 
 /// Authorize the given pubkey to withdraw or sign votes. This may be called multiple times,
@@ -1176,7 +1176,7 @@ fn do_process_tower_sync(
         vote_state,
         &mut tower_sync.lockouts,
         &mut tower_sync.root,
-        tower_sync.hash,
+        tower_sync.vote_only_hash,
         slot_hashes,
     )?;
     process_new_vote_state(

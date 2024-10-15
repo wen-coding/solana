@@ -110,12 +110,16 @@ impl VoteSimulator {
                             solana_vote_program::vote_state::Vote::new(
                                 vec![parent],
                                 parent_bank.hash(),
+                                parent,
+                                parent_bank.hash(),
                             ),
                         )
                         .unwrap();
                         TowerSync::new(
                             vote_state.votes.iter().map(|vote| vote.lockout).collect(),
                             vote_state.root_slot,
+                            parent_bank.hash(),
+                            vote_state.replay_tip_slot,
                             parent_bank.hash(),
                             Hash::default(),
                         )
@@ -124,6 +128,8 @@ impl VoteSimulator {
                             VecDeque::from([Lockout::new(parent)]),
                             Some(root),
                             parent_bank.hash(),
+                            0,
+                            Hash::default(),
                             Hash::default(),
                         )
                     };

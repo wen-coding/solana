@@ -190,6 +190,7 @@ pub struct ForkStats {
     pub computed: bool,
     pub lockout_intervals: LockoutIntervals,
     pub bank_hash: Option<Hash>,
+    pub vote_only_hash: Option<Hash>,
     pub my_latest_landed_vote: Option<Slot>,
 }
 
@@ -328,6 +329,12 @@ impl ProgressMap {
         self.progress_map
             .get(&slot)
             .and_then(|fork_progress| fork_progress.fork_stats.bank_hash)
+    }
+
+    pub fn get_vote_only_hash(&self, slot: Slot) -> Option<Hash> {
+        self.progress_map
+            .get(&slot)
+            .and_then(|fork_progress| fork_progress.fork_stats.vote_only_hash)
     }
 
     pub fn is_propagated(&self, slot: Slot) -> Option<bool> {

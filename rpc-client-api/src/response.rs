@@ -352,6 +352,8 @@ pub struct RpcVote {
     pub vote_pubkey: String,
     pub slots: Vec<Slot>,
     pub hash: String,
+    pub replay_tip_slot: Slot,
+    pub replay_tip_hash: String,
     pub timestamp: Option<UnixTimestamp>,
     pub signature: String,
 }

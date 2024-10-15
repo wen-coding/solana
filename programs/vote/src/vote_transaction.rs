@@ -15,12 +15,14 @@ pub fn new_vote_transaction(
     slots: Vec<Slot>,
     bank_hash: Hash,
     blockhash: Hash,
+    replay_tip_slot: Slot,
+    replay_tip_hash: Hash,
     node_keypair: &Keypair,
     vote_keypair: &Keypair,
     authorized_voter_keypair: &Keypair,
     switch_proof_hash: Option<Hash>,
 ) -> Transaction {
-    let votes = Vote::new(slots, bank_hash);
+    let votes = Vote::new(slots, bank_hash, replay_tip_slot, replay_tip_hash);
     let vote_ix = if let Some(switch_proof_hash) = switch_proof_hash {
         vote::instruction::vote_switch(
             &vote_keypair.pubkey(),

@@ -38,7 +38,7 @@ impl VoteTransaction {
         match self {
             VoteTransaction::Vote(vote) => vote.hash,
             VoteTransaction::VoteStateUpdate(vote_state_update) => vote_state_update.hash,
-            VoteTransaction::TowerSync(tower_sync) => tower_sync.hash,
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.vote_only_hash,
         }
     }
 
@@ -62,6 +62,18 @@ impl VoteTransaction {
 
     pub fn last_voted_slot_hash(&self) -> Option<(Slot, Hash)> {
         Some((self.last_voted_slot()?, self.hash()))
+    }
+
+    pub fn replay_tip_slot(&self) -> Slot {
+        self.last_voted_slot().unwrap_or(0)
+    }
+
+    pub fn replay_tip_hash(&self) -> Hash {
+        match self {
+            VoteTransaction::Vote(vote) => vote.hash,
+            VoteTransaction::VoteStateUpdate(vote_state_update) => vote_state_update.hash,
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.replay_tip_hash,
+        }
     }
 }
 

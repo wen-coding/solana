@@ -3565,6 +3565,8 @@ impl ReplayStage {
                 .root_slot
                 .expect("root_slot cannot be None here"),
         );
+        let replay_tip_slot = tower.vote_state.replay_tip_slot;
+
         // This is safe because `last_voted_slot` is now equal to
         // `bank_vote_state.last_voted_slot()` or `local_root`.
         // Since this vote state is contained in `bank`, which we have frozen,
@@ -3581,7 +3583,10 @@ impl ReplayStage {
         // is present in progress map.
         tower.update_last_vote_from_vote_state(
             progress
-                .get_hash(last_voted_slot)
+                .get_vote_only_hash(last_voted_slot)
+                .expect("Must exist for us to have frozen descendant"),
+                progress
+                .get_hash(replay_tip_slot)
                 .expect("Must exist for us to have frozen descendant"),
             bank.feature_set
                 .is_active(&solana_feature_set::enable_tower_sync_ix::id()),

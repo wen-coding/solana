@@ -829,6 +829,9 @@ impl RpcSubscriptions {
                                     vote_pubkey: vote_pubkey.to_string(),
                                     slots: vote_info.slots(),
                                     hash: bs58::encode(vote_info.hash()).into_string(),
+                                    replay_tip_slot: vote_info.replay_tip_slot(),
+                                    replay_tip_hash: bs58::encode(vote_info.replay_tip_hash())
+                                        .into_string(),
                                     timestamp: vote_info.timestamp(),
                                     signature: signature.to_string(),
                                 };
