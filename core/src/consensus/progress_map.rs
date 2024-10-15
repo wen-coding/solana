@@ -169,7 +169,7 @@ impl ForkProgress {
         );
 
         if bank.is_frozen() {
-            new_progress.fork_stats.bank_hash = Some(bank.hash());
+            new_progress.fork_stats.vote_only_hash = Some(bank.vote_only_hash());
         }
         new_progress
     }
@@ -189,7 +189,6 @@ pub struct ForkStats {
     pub duplicate_confirmed_hash: Option<Hash>,
     pub computed: bool,
     pub lockout_intervals: LockoutIntervals,
-    pub bank_hash: Option<Hash>,
     pub vote_only_hash: Option<Hash>,
     pub my_latest_landed_vote: Option<Slot>,
 }
@@ -326,12 +325,6 @@ impl ProgressMap {
     }
 
     pub fn get_hash(&self, slot: Slot) -> Option<Hash> {
-        self.progress_map
-            .get(&slot)
-            .and_then(|fork_progress| fork_progress.fork_stats.bank_hash)
-    }
-
-    pub fn get_vote_only_hash(&self, slot: Slot) -> Option<Hash> {
         self.progress_map
             .get(&slot)
             .and_then(|fork_progress| fork_progress.fork_stats.vote_only_hash)
