@@ -765,40 +765,6 @@ pub(crate) fn aggregate_restart_heaviest_fork(
     }
 }
 
-pub(crate) fn receive_restart_heaviest_fork(
-    wen_restart_coordinator: Pubkey,
-    cluster_info: Arc<ClusterInfo>,
-    exit: Arc<AtomicBool>,
-    progress: &mut WenRestartProgress,
-) -> Result<(Slot, Hash)> {
-    let mut cursor = solana_gossip::crds::Cursor::default();
-    loop {
-        if exit.load(Ordering::Relaxed) {
-            return Err(WenRestartError::Exiting.into());
-        }
-        for new_heaviest_fork in cluster_info.get_restart_heaviest_fork(&mut cursor) {
-            if new_heaviest_fork.from == wen_restart_coordinator {
-                info!(
-                    "Received new heaviest fork from coordinator: {} {:?}",
-                    wen_restart_coordinator, new_heaviest_fork
-                );
-                let coordinator_heaviest_slot = new_heaviest_fork.last_slot;
-                let coordinator_heaviest_hash = new_heaviest_fork.last_slot_hash;
-                progress.coordinator_heaviest_fork = Some(HeaviestForkRecord {
-                    slot: coordinator_heaviest_slot,
-                    bankhash: coordinator_heaviest_hash.to_string(),
-                    total_active_stake: 0,
-                    wallclock: new_heaviest_fork.wallclock,
-                    shred_version: new_heaviest_fork.shred_version as u32,
-                    from: new_heaviest_fork.from.to_string(),
-                });
-                return Ok((coordinator_heaviest_slot, coordinator_heaviest_hash));
-            }
-        }
-        sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
-    }
-}
-
 pub(crate) fn repair_heaviest_fork(
     my_heaviest_fork_slot: Slot,
     heaviest_slot: Slot,
@@ -931,6 +897,7 @@ pub(crate) fn receive_restart_heaviest_fork(
                     total_active_stake: 0,
                     wallclock: new_heaviest_fork.wallclock,
                     shred_version: new_heaviest_fork.shred_version as u32,
+                    from: new_heaviest_fork.from.to_string(),
                 });
                 return Ok((coordinator_heaviest_slot, coordinator_heaviest_hash));
             }
@@ -1940,17 +1907,6 @@ mod tests {
                     bankhash: progress.my_snapshot.as_ref().unwrap().bankhash.clone(),
                     shred_version: progress.my_snapshot.as_ref().unwrap().shred_version,
                     path: progress.my_snapshot.as_ref().unwrap().path.clone(),
-                }),
-                coordinator_heaviest_fork: Some(HeaviestForkRecord {
-                    slot: expected_heaviest_fork_slot,
-                    bankhash: expected_heaviest_fork_bankhash.to_string(),
-                    total_active_stake: 0,
-                    shred_version: SHRED_VERSION as u32,
-                    wallclock: progress
-                        .coordinator_heaviest_fork
-                        .as_ref()
-                        .unwrap()
-                        .wallclock,
                 }),
                 ..Default::default()
             }
