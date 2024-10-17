@@ -346,6 +346,8 @@ pub struct TransactionSimulationResult {
     pub return_data: Option<TransactionReturnData>,
     pub inner_instructions: Option<Vec<InnerInstructions>>,
 }
+
+#[derive(Clone)]
 pub struct TransactionBalancesSet {
     pub pre_balances: TransactionBalances,
     pub post_balances: TransactionBalances,
@@ -1048,7 +1050,7 @@ impl Bank {
         };
 
         bank.transaction_processor =
-            TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch, HashSet::default());
+            TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
 
         let accounts_data_size_initial = bank.get_total_accounts_stats().unwrap().data_len as u64;
         bank.accounts_data_size_initial = accounts_data_size_initial;
@@ -1702,7 +1704,7 @@ impl Bank {
         };
 
         bank.transaction_processor =
-            TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch, HashSet::default());
+            TransactionBatchProcessor::new_uninitialized(bank.slot, bank.epoch);
 
         let thread_pool = ThreadPoolBuilder::new()
             .thread_name(|i| format!("solBnkNewFlds{i:02}"))
@@ -5661,8 +5663,10 @@ impl Bank {
                     .spawn(move || {
                         info!("Initial background accounts hash verification has started");
                         let start = Instant::now();
-                        let mut accounts_lt_hash_time = None;
+                        let mut lattice_verify_time = None;
+                        let mut merkle_verify_time = None;
                         if is_accounts_lt_hash_enabled {
+                            // accounts lt hash is *enabled* so use lattice-based verification
                             let accounts_db = &accounts_.accounts_db;
                             let (calculated_accounts_lt_hash, duration) =
                                 meas_dur!(accounts_db.thread_pool_hash.install(|| {
@@ -5680,26 +5684,31 @@ impl Bank {
                                 );
                                 return false;
                             }
-                            accounts_lt_hash_time = Some(duration);
+                            lattice_verify_time = Some(duration);
+                        } else {
+                            // accounts lt hash is *disabled* so use merkle-based verification
+                            let snapshot_storages_and_slots = (
+                                snapshot_storages.0.as_slice(),
+                                snapshot_storages.1.as_slice(),
+                            );
+                            let (result, duration) = meas_dur!(accounts_
+                                .verify_accounts_hash_and_lamports(
+                                    snapshot_storages_and_slots,
+                                    slot,
+                                    capitalization,
+                                    base,
+                                    VerifyAccountsHashAndLamportsConfig {
+                                        ancestors: &ancestors,
+                                        epoch_schedule: &epoch_schedule,
+                                        rent_collector: &rent_collector,
+                                        ..verify_config
+                                    },
+                                ));
+                            if !result {
+                                return false;
+                            }
+                            merkle_verify_time = Some(duration);
                         }
-
-                        let snapshot_storages_and_slots = (
-                            snapshot_storages.0.as_slice(),
-                            snapshot_storages.1.as_slice(),
-                        );
-                        let (result, accounts_hash_time) = meas_dur!(accounts_
-                            .verify_accounts_hash_and_lamports(
-                                snapshot_storages_and_slots,
-                                slot,
-                                capitalization,
-                                base,
-                                VerifyAccountsHashAndLamportsConfig {
-                                    ancestors: &ancestors,
-                                    epoch_schedule: &epoch_schedule,
-                                    rent_collector: &rent_collector,
-                                    ..verify_config
-                                },
-                            ));
                         accounts_
                             .accounts_db
                             .verify_accounts_hash_in_bg
@@ -5710,13 +5719,16 @@ impl Bank {
                             ("total_us", total_time.as_micros(), i64),
                             (
                                 "verify_accounts_lt_hash_us",
-                                accounts_lt_hash_time.as_ref().map(Duration::as_micros),
+                                lattice_verify_time.as_ref().map(Duration::as_micros),
                                 Option<i64>
                             ),
-                            ("verify_accounts_hash_us", accounts_hash_time.as_micros(), i64),
+                            ("verify_accounts_hash_us",
+                                merkle_verify_time.as_ref().map(Duration::as_micros),
+                                Option<i64>
+                            ),
                         );
                         info!("Initial background accounts hash verification has stopped");
-                        result
+                        true
                     })
                     .unwrap()
             });
@@ -5866,6 +5878,22 @@ impl Bank {
         tx: VersionedTransaction,
     ) -> Result<SanitizedTransaction> {
         self.verify_transaction(tx, TransactionVerificationMode::FullVerification)
+    }
+
+    /// Checks if the transaction violates the bank's reserved keys.
+    /// This needs to be checked upon epoch boundary crosses because the
+    /// reserved key set may have changed since the initial sanitization.
+    pub fn check_reserved_keys(&self, tx: &impl SVMMessage) -> Result<()> {
+        // Check keys against the reserved set - these failures simply require us
+        // to re-sanitize the transaction. We do not need to drop the transaction.
+        let reserved_keys = self.get_reserved_account_keys();
+        for (index, key) in tx.account_keys().iter().enumerate() {
+            if tx.is_writable(index) && reserved_keys.contains(key) {
+                return Err(TransactionError::ResanitizationNeeded);
+            }
+        }
+
+        Ok(())
     }
 
     /// only called from ledger-tool or tests
