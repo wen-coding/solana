@@ -906,6 +906,39 @@ pub(crate) fn verify_coordinator_heaviest_fork(
     Ok(())
 }
 
+pub(crate) fn receive_restart_heaviest_fork(
+    wen_restart_coordinator: Pubkey,
+    cluster_info: Arc<ClusterInfo>,
+    exit: Arc<AtomicBool>,
+    progress: &mut WenRestartProgress,
+) -> Result<(Slot, Hash)> {
+    let mut cursor = solana_gossip::crds::Cursor::default();
+    loop {
+        if exit.load(Ordering::Relaxed) {
+            return Err(WenRestartError::Exiting.into());
+        }
+        for new_heaviest_fork in cluster_info.get_restart_heaviest_fork(&mut cursor) {
+            if new_heaviest_fork.from == wen_restart_coordinator {
+                info!(
+                    "Received new heaviest fork from coordinator: {} {:?}",
+                    wen_restart_coordinator, new_heaviest_fork
+                );
+                let coordinator_heaviest_slot = new_heaviest_fork.last_slot;
+                let coordinator_heaviest_hash = new_heaviest_fork.last_slot_hash;
+                progress.coordinator_heaviest_fork = Some(HeaviestForkRecord {
+                    slot: coordinator_heaviest_slot,
+                    bankhash: coordinator_heaviest_hash.to_string(),
+                    total_active_stake: 0,
+                    wallclock: new_heaviest_fork.wallclock,
+                    shred_version: new_heaviest_fork.shred_version as u32,
+                });
+                return Ok((coordinator_heaviest_slot, coordinator_heaviest_hash));
+            }
+        }
+        sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
+    }
+}
+
 #[derive(Clone)]
 pub struct WenRestartConfig {
     pub wen_restart_path: PathBuf,
@@ -1160,10 +1193,7 @@ pub(crate) fn increment_and_write_wen_restart_records(
                 return Err(WenRestartError::UnexpectedState(RestartState::HeaviestFork).into());
             }
         }
-        WenRestartProgressInternalState::HeaviestFork {
-            new_root_slot,
-            new_root_hash: _,
-        } => {
+        WenRestartProgressInternalState::HeaviestFork { new_root_slot, .. } => {
             progress.set_state(RestartState::GenerateSnapshot);
             WenRestartProgressInternalState::GenerateSnapshot {
                 new_root_slot,
@@ -1910,6 +1940,17 @@ mod tests {
                     bankhash: progress.my_snapshot.as_ref().unwrap().bankhash.clone(),
                     shred_version: progress.my_snapshot.as_ref().unwrap().shred_version,
                     path: progress.my_snapshot.as_ref().unwrap().path.clone(),
+                }),
+                coordinator_heaviest_fork: Some(HeaviestForkRecord {
+                    slot: expected_heaviest_fork_slot,
+                    bankhash: expected_heaviest_fork_bankhash.to_string(),
+                    total_active_stake: 0,
+                    shred_version: SHRED_VERSION as u32,
+                    wallclock: progress
+                        .coordinator_heaviest_fork
+                        .as_ref()
+                        .unwrap()
+                        .wallclock,
                 }),
                 ..Default::default()
             }
