@@ -2690,10 +2690,6 @@ mod tests {
             path: "snapshot_1".to_string(),
             shred_version: new_shred_version as u32,
         });
-        let heaviest_fork_aggregate = Some(HeaviestForkAggregateRecord {
-            received: Vec::new(),
-            total_active_stake: 0,
-        });
         let expected_slots_stake_map: HashMap<Slot, u64> =
             vec![(0, 900), (1, 800)].into_iter().collect();
         for (entrance_state, exit_state, entrance_progress, exit_progress) in [
