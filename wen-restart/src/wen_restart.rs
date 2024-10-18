@@ -58,7 +58,7 @@ use {
             Arc, RwLock,
         },
         thread::sleep,
-        time::Duration,
+        time::{Duration, Instant},
     },
 };
 
@@ -70,6 +70,8 @@ const REPAIR_THRESHOLD: f64 = 0.42;
 // made regarding how much non-conforming/offline validators the
 // algorithm can tolerate.
 const HEAVIEST_FORK_THRESHOLD_DELTA: f64 = 0.38;
+// The coordinator print new stats every 10 seconds.
+const COORDINATOR_STAT_PRINT_INTERVAL_SECONDS: u64 = 10;
 
 #[derive(Debug, PartialEq)]
 pub enum WenRestartError {
@@ -651,7 +653,7 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
     Ok(parent_bank.hash())
 }
 
-// Aggregate the heaviest fork and send updates to the cluster.
+// Aggregate the heaviest fork at the coordinator.
 pub(crate) fn aggregate_restart_heaviest_fork(
     wen_restart_path: &PathBuf,
     cluster_info: Arc<ClusterInfo>,
@@ -698,11 +700,9 @@ pub(crate) fn aggregate_restart_heaviest_fork(
 
     let mut cursor = solana_gossip::crds::Cursor::default();
     let mut total_active_stake = 0;
+    let mut stat_printed_at = Instant::now();
     loop {
         if exit.load(Ordering::Relaxed) {
-            for ((slot, hash), stake) in heaviest_fork_aggregate.block_stake_map().iter() {
-                info!("Slot: {}, Hash: {}, Stake: {}", slot, hash, stake,);
-            }
             return Ok(());
         }
         let start = timestamp();
@@ -753,6 +753,12 @@ pub(crate) fn aggregate_restart_heaviest_fork(
         let time_left = GOSSIP_SLEEP_MILLIS.saturating_sub(elapsed);
         if time_left > 0 {
             sleep(Duration::from_millis(time_left));
+        }
+        // Print the block stake map after a while.
+        if stat_printed_at.elapsed() > Duration::from_secs(COORDINATOR_STAT_PRINT_INTERVAL_SECONDS)
+        {
+            heaviest_fork_aggregate.print_block_stake_map();
+            stat_printed_at = Instant::now();
         }
     }
 }
@@ -903,7 +909,7 @@ pub(crate) fn send_and_receive_heaviest_fork(
     new_root_hash: Hash,
     config: &WenRestartConfig,
     progress: &mut WenRestartProgress,
-    pushfn: impl FnOnce(Slot, Hash) -> (),
+    pushfn: impl FnOnce(Slot, Hash),
 ) -> Result<(Slot, Hash)> {
     if config.cluster_info.id() == config.wen_restart_coordinator {
         pushfn(new_root_slot, new_root_hash);
@@ -926,7 +932,10 @@ pub(crate) fn send_and_receive_heaviest_fork(
         ) {
             Ok(()) => pushfn(coordinator_slot, coordinator_hash),
             Err(e) => {
-                warn!("Failed to verify coordinator heaviest fork: {:?}, exit in 10 seconds", e);
+                warn!(
+                    "Failed to verify coordinator heaviest fork: {:?}, exit in 10 seconds",
+                    e
+                );
                 pushfn(new_root_slot, new_root_hash);
                 // Wait for 10 seconds so the heaviest fork gets out.
                 sleep(Duration::from_secs(10));
@@ -1040,13 +1049,15 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                     &config,
                     &mut progress,
                     |slot, hash| {
-                        config.cluster_info.push_restart_heaviest_fork(slot, hash, 0);
+                        config
+                            .cluster_info
+                            .push_restart_heaviest_fork(slot, hash, 0);
                     },
                 )?;
                 WenRestartProgressInternalState::HeaviestFork {
                     new_root_slot: slot,
                     new_root_hash: hash,
-                }        
+                }
             }
             WenRestartProgressInternalState::GenerateSnapshot {
                 new_root_slot,
@@ -3554,8 +3565,14 @@ mod tests {
         let mut slots = test_state.last_voted_fork_slots.clone();
         slots.reverse();
         let coordinator_hash = find_bankhash_of_heaviest_fork(
-            coordinator_slot, slots, test_state.blockstore.clone(), test_state.bank_forks.clone(),
-            old_root_bank, &exit).unwrap();
+            coordinator_slot,
+            slots,
+            test_state.blockstore.clone(),
+            test_state.bank_forks.clone(),
+            old_root_bank,
+            &exit,
+        )
+        .unwrap();
         let mut progress = WenRestartProgress {
             state: RestartState::HeaviestFork.into(),
             ..Default::default()
@@ -3576,10 +3593,16 @@ mod tests {
             exit: exit.clone(),
         };
         assert_eq!(
-            send_and_receive_heaviest_fork(coordinator_slot, coordinator_hash, &config, &mut progress, |slot, hash| {
-                pushed_slot = slot;
-                pushed_hash = hash;
-            })
+            send_and_receive_heaviest_fork(
+                coordinator_slot,
+                coordinator_hash,
+                &config,
+                &mut progress,
+                |slot, hash| {
+                    pushed_slot = slot;
+                    pushed_hash = hash;
+                }
+            )
             .unwrap(),
             (coordinator_slot, coordinator_hash)
         );
@@ -3602,12 +3625,24 @@ mod tests {
             now,
         );
         let my_slot = test_state.last_voted_fork_slots[1];
-        let my_hash = test_state.bank_forks.read().unwrap().get(my_slot).unwrap().hash();
+        let my_hash = test_state
+            .bank_forks
+            .read()
+            .unwrap()
+            .get(my_slot)
+            .unwrap()
+            .hash();
         assert_eq!(
-            send_and_receive_heaviest_fork(my_slot, my_hash, &config, &mut progress, |slot, hash| {
-                pushed_slot = slot;
-                pushed_hash = hash;
-            })
+            send_and_receive_heaviest_fork(
+                my_slot,
+                my_hash,
+                &config,
+                &mut progress,
+                |slot, hash| {
+                    pushed_slot = slot;
+                    pushed_hash = hash;
+                }
+            )
             .unwrap(),
             (coordinator_slot, coordinator_hash)
         );
@@ -3624,10 +3659,16 @@ mod tests {
         );
         let my_hash = Hash::new_unique();
         assert_eq!(
-            send_and_receive_heaviest_fork(my_slot, my_hash, &config, &mut progress, |slot, hash| {
-                pushed_slot = slot;
-                pushed_hash = hash;
-            })
+            send_and_receive_heaviest_fork(
+                my_slot,
+                my_hash,
+                &config,
+                &mut progress,
+                |slot, hash| {
+                    pushed_slot = slot;
+                    pushed_hash = hash;
+                }
+            )
             .unwrap_err()
             .downcast::<WenRestartError>()
             .unwrap(),
