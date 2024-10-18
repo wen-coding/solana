@@ -570,15 +570,13 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
     root_bank: Arc<Bank>,
     exit: &AtomicBool,
 ) -> Result<Hash> {
+    if let Some(hash) = bank_forks
+        .read()
+        .unwrap()
+        .get(heaviest_fork_slot)
+        .map(|bank| bank.hash())
     {
-        if let Some(hash) = bank_forks
-            .read()
-            .unwrap()
-            .get(heaviest_fork_slot)
-            .map(|bank| bank.hash())
-        {
-            return Ok(hash);
-        }
+        return Ok(hash);
     }
     let leader_schedule_cache = LeaderScheduleCache::new_from_bank(&root_bank);
     let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
@@ -648,11 +646,6 @@ pub(crate) fn find_bankhash_of_heaviest_fork(
                 cur_bank
             }
         };
-        info!(
-            "wen_restart find bankhash slot: {} hash: {}",
-            slot,
-            bank.hash()
-        );
         parent_bank = bank;
     }
     Ok(parent_bank.hash())
@@ -1153,7 +1146,7 @@ pub(crate) fn increment_and_write_wen_restart_records(
                 progress.my_heaviest_fork = Some(my_heaviest_fork.clone());
                 WenRestartProgressInternalState::HeaviestFork {
                     new_root_slot: my_heaviest_fork.slot,
-                    new_root_hash: Hash::from_str(&my_heaviest_fork.bankhash)?,
+                    new_root_hash: Hash::from_str(&my_heaviest_fork.bankhash).unwrap(),
                 }
             } else {
                 return Err(WenRestartError::UnexpectedState(RestartState::HeaviestFork).into());
@@ -2673,14 +2666,13 @@ mod tests {
             wallclock: 0,
             from: my_pubkey.to_string(),
         });
-        let coordinator_pubkey = Pubkey::new_unique();
         let coordinator_heaviest_fork = Some(HeaviestForkRecord {
             slot: 2,
-            bankhash: Hash::default().to_string(),
+            bankhash: Hash::new_unique().to_string(),
             total_active_stake: 800,
             shred_version: SHRED_VERSION as u32,
             wallclock: 0,
-            from: coordinator_pubkey.to_string(),
+            from: Pubkey::new_unique().to_string(),
         });
         let my_bankhash = Hash::new_unique();
         let new_shred_version = SHRED_VERSION + 57;
