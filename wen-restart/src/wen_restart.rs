@@ -1025,11 +1025,14 @@ pub fn wait_for_wen_restart(config: WenRestartConfig) -> Result<()> {
                             0,
                         ),
                         Err(e) => {
+                            warn!("Failed to verify coordinator heaviest fork: {:?}, exit in 10 seconds", e);
                             config.cluster_info.push_restart_heaviest_fork(
                                 new_root_slot,
                                 new_root_hash,
                                 0,
                             );
+                            // Wait for 10 seconds so the heaviest fork gets out.
+                            sleep(Duration::from_secs(10));
                             return Err(e);
                         }
                     }
@@ -1773,21 +1776,23 @@ mod tests {
             test_state.last_blockhash,
         );
 
-        let expected_heaviest_fork_slot = last_vote_slot + 2;
-        let expected_heaviest_fork_bankhash;
+        let my_heaviest_fork_slot = last_vote_slot + 2;
+        let my_heaviest_fork_bankhash;
         loop {
             if let Some(bank) = test_state
                 .bank_forks
                 .read()
                 .unwrap()
-                .get(expected_heaviest_fork_slot)
+                .get(my_heaviest_fork_slot)
             {
-                expected_heaviest_fork_bankhash = bank.hash();
+                my_heaviest_fork_bankhash = bank.hash();
                 break;
             }
             sleep(Duration::from_millis(100));
         }
         // Now simulate receiving HeaviestFork messages from coordinator.
+        let coordinator_heaviest_fork_slot = my_heaviest_fork_slot - 1;
+        let coordinator_heaviest_fork_bankhash = test_state.bank_forks.read().unwrap().get(coordinator_heaviest_fork_slot).unwrap().hash();
         let coordinator_keypair =
             &test_state.validator_voting_keypairs[COORDINATOR_INDEX].node_keypair;
         let node = ContactInfo::new_rand(&mut rng, Some(coordinator_keypair.pubkey()));
@@ -1795,8 +1800,8 @@ mod tests {
         push_restart_heaviest_fork(
             test_state.cluster_info.clone(),
             &node,
-            expected_heaviest_fork_slot,
-            &expected_heaviest_fork_bankhash,
+            coordinator_heaviest_fork_slot,
+            &coordinator_heaviest_fork_bankhash,
             0,
             coordinator_keypair,
             now,
@@ -1858,8 +1863,8 @@ mod tests {
                     }),
                 }),
                 my_heaviest_fork: Some(HeaviestForkRecord {
-                    slot: expected_heaviest_fork_slot,
-                    bankhash: expected_heaviest_fork_bankhash.to_string(),
+                    slot: my_heaviest_fork_slot,
+                    bankhash: my_heaviest_fork_bankhash.to_string(),
                     total_active_stake: 0,
                     shred_version: SHRED_VERSION as u32,
                     wallclock: 0,
@@ -1867,14 +1872,14 @@ mod tests {
                 }),
                 heaviest_fork_aggregate: None,
                 my_snapshot: Some(GenerateSnapshotRecord {
-                    slot: expected_heaviest_fork_slot,
+                    slot: coordinator_heaviest_fork_slot,
                     bankhash: progress.my_snapshot.as_ref().unwrap().bankhash.clone(),
                     shred_version: progress.my_snapshot.as_ref().unwrap().shred_version,
                     path: progress.my_snapshot.as_ref().unwrap().path.clone(),
                 }),
                 coordinator_heaviest_fork: Some(HeaviestForkRecord {
-                    slot: expected_heaviest_fork_slot,
-                    bankhash: expected_heaviest_fork_bankhash.to_string(),
+                    slot: coordinator_heaviest_fork_slot,
+                    bankhash: coordinator_heaviest_fork_bankhash.to_string(),
                     total_active_stake: 0,
                     shred_version: SHRED_VERSION as u32,
                     wallclock: progress
