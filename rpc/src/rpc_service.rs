@@ -5,7 +5,11 @@ use {
         cluster_tpu_info::ClusterTpuInfo,
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        rpc::{rpc_accounts::*, rpc_accounts_scan::*, rpc_bank::*, rpc_full::*, rpc_minimal::*, *},
+        rpc::{
+            rpc_accounts::*, rpc_accounts_scan::*, rpc_bank::*, rpc_deprecated_v1_18::*,
+            rpc_deprecated_v1_7::*, rpc_deprecated_v1_9::*, rpc_full::*, rpc_minimal::*,
+            rpc_obsolete_v1_7::*, *,
+        },
         rpc_cache::LargestAccountsCache,
         rpc_health::*,
     },
@@ -16,100 +20,43 @@ use {
         RequestMiddlewareAction, ServerBuilder,
     },
     regex::Regex,
-    solana_client::connection_cache::{ConnectionCache, Protocol},
-    solana_genesis_config::DEFAULT_GENESIS_DOWNLOAD_PATH,
+    solana_client::connection_cache::ConnectionCache,
     solana_gossip::cluster_info::ClusterInfo,
-    solana_hash::Hash,
-    solana_keypair::Keypair,
     solana_ledger::{
         bigtable_upload::ConfirmedBlockUploadConfig,
         bigtable_upload_service::BigTableUploadService, blockstore::Blockstore,
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_metrics::inc_new_counter_info,
-    solana_native_token::lamports_to_sol,
     solana_perf::thread::renice_this_thread,
     solana_poh::poh_recorder::PohRecorder,
-    solana_quic_definitions::NotifyKeyUpdate,
     solana_runtime::{
-        bank::Bank, bank_forks::BankForks, commitment::BlockCommitmentCache,
-        non_circulating_supply::calculate_non_circulating_supply,
+        bank_forks::BankForks, commitment::BlockCommitmentCache,
         prioritization_fee_cache::PrioritizationFeeCache,
-        snapshot_archive_info::SnapshotArchiveInfoGetter,
-        snapshot_bank_utils::DISABLED_SNAPSHOT_ARCHIVE_INTERVAL, snapshot_config::SnapshotConfig,
+        snapshot_archive_info::SnapshotArchiveInfoGetter, snapshot_config::SnapshotConfig,
         snapshot_utils,
     },
-    solana_send_transaction_service::{
-        send_transaction_service::{self, SendTransactionService},
-        transaction_client::{ConnectionCacheClient, TpuClientNextClient, TransactionClient},
+    solana_sdk::{
+        exit::Exit, genesis_config::DEFAULT_GENESIS_DOWNLOAD_PATH, hash::Hash,
+        native_token::lamports_to_sol,
     },
+    solana_send_transaction_service::send_transaction_service::{self, SendTransactionService},
     solana_storage_bigtable::CredentialType,
-    solana_validator_exit::Exit,
     std::{
-        net::{SocketAddr, UdpSocket},
+        net::SocketAddr,
         path::{Path, PathBuf},
-        pin::Pin,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
         },
-        task::{Context, Poll},
         thread::{self, Builder, JoinHandle},
-        time::{Duration, Instant},
     },
-    tokio::runtime::{Builder as TokioBuilder, Handle as RuntimeHandle, Runtime as TokioRuntime},
-    tokio_util::{
-        bytes::Bytes,
-        codec::{BytesCodec, FramedRead},
-        sync::CancellationToken,
-    },
+    tokio_util::codec::{BytesCodec, FramedRead},
 };
 
 const FULL_SNAPSHOT_REQUEST_PATH: &str = "/snapshot.tar.bz2";
 const INCREMENTAL_SNAPSHOT_REQUEST_PATH: &str = "/incremental-snapshot.tar.bz2";
 const LARGEST_ACCOUNTS_CACHE_DURATION: u64 = 60 * 60 * 2;
-/// Default minimum snapshot download speed is 10 MB/s
-/// Full snapshots are ~90 GB, incremental are ~1 GB today but both will increase over time
-/// Full: 120 GB / 10 MB/s = 12,000 seconds -> ~30k slots
-const FALLBACK_FULL_SNAPSHOT_TIMEOUT_SECS: Duration = Duration::from_secs(12_000);
-/// Incremental: 2.5 GB / 10 MB/s = 250 seconds -> ~625 slots
-const FALLBACK_INCREMENTAL_SNAPSHOT_TIMEOUT_SECS: Duration = Duration::from_secs(250);
-
-enum SnapshotKind {
-    Full,
-    Incremental,
-}
-
-struct TimeoutStream<S> {
-    inner: S,
-    deadline: Instant,
-}
-
-impl<S> TimeoutStream<S> {
-    fn new(inner: S, timeout: Duration) -> Self {
-        Self {
-            inner,
-            deadline: Instant::now() + timeout,
-        }
-    }
-}
-
-impl<S> Stream for TimeoutStream<S>
-where
-    S: Stream<Item = std::io::Result<Bytes>> + Unpin,
-{
-    type Item = std::io::Result<Bytes>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if Instant::now() >= self.deadline {
-            return Poll::Ready(Some(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "snapshot transfer deadline exceeded",
-            ))));
-        }
-        Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
 
 pub struct JsonRpcService {
     thread_hdl: JoinHandle<()>,
@@ -118,8 +65,6 @@ pub struct JsonRpcService {
     pub request_processor: JsonRpcRequestProcessor, // Used only by test_rpc_new()...
 
     close_handle: Option<CloseHandle>,
-
-    client_updater: Arc<dyn NotifyKeyUpdate + Send + Sync>,
 }
 
 struct RpcRequestMiddleware {
@@ -169,6 +114,7 @@ impl RpcRequestMiddleware {
             .unwrap()
     }
 
+    #[allow(dead_code)]
     fn internal_server_error() -> hyper::Response<hyper::Body> {
         hyper::Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
@@ -214,14 +160,14 @@ impl RpcRequestMiddleware {
         tokio::fs::File::open(path).await
     }
 
-    fn find_snapshot_file<P>(&self, stem: P) -> (PathBuf, SnapshotKind)
+    fn find_snapshot_file<P>(&self, stem: P) -> PathBuf
     where
         P: AsRef<Path>,
     {
-        let is_full = self
+        let root = if self
             .full_snapshot_archive_path_regex
-            .is_match(Path::new("").join(&stem).to_str().unwrap());
-        let root = if is_full {
+            .is_match(Path::new("").join(&stem).to_str().unwrap())
+        {
             &self
                 .snapshot_config
                 .as_ref()
@@ -235,71 +181,37 @@ impl RpcRequestMiddleware {
                 .incremental_snapshot_archives_dir
         };
         let local_path = root.join(&stem);
-        let path = if local_path.exists() {
+        if local_path.exists() {
             local_path
         } else {
             // remote snapshot archive path
             snapshot_utils::build_snapshot_archives_remote_dir(root).join(stem)
-        };
-        (
-            path,
-            if is_full {
-                SnapshotKind::Full
-            } else {
-                SnapshotKind::Incremental
-            },
-        )
+        }
     }
 
     fn process_file_get(&self, path: &str) -> RequestMiddlewareAction {
-        let (filename, snapshot_type) = {
+        let filename = {
             let stem = Self::strip_leading_slash(path).expect("path already verified");
             match path {
                 DEFAULT_GENESIS_DOWNLOAD_PATH => {
                     inc_new_counter_info!("rpc-get_genesis", 1);
-                    (self.ledger_path.join(stem), None)
+                    self.ledger_path.join(stem)
                 }
                 _ => {
                     inc_new_counter_info!("rpc-get_snapshot", 1);
-                    let (path, snapshot_type) = self.find_snapshot_file(stem);
-                    (path, Some(snapshot_type))
+                    self.find_snapshot_file(stem)
                 }
             }
         };
+
         let file_length = std::fs::metadata(&filename)
             .map(|m| m.len())
             .unwrap_or(0)
             .to_string();
         info!("get {} -> {:?} ({} bytes)", path, filename, file_length);
-
-        if cfg!(not(test)) {
-            assert!(
-                self.snapshot_config.is_some(),
-                "snapshot_config should never be None outside of tests"
-            );
-        }
-        let snapshot_timeout = self.snapshot_config.as_ref().and_then(|config| {
-            snapshot_type.map(|st| {
-                let slots = match st {
-                    SnapshotKind::Full => config.full_snapshot_archive_interval_slots,
-                    SnapshotKind::Incremental => config.incremental_snapshot_archive_interval_slots,
-                };
-                let computed = if slots == DISABLED_SNAPSHOT_ARCHIVE_INTERVAL {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(slots.saturating_mul(solana_clock::DEFAULT_MS_PER_SLOT))
-                };
-                let fallback = match st {
-                    SnapshotKind::Full => FALLBACK_FULL_SNAPSHOT_TIMEOUT_SECS,
-                    SnapshotKind::Incremental => FALLBACK_INCREMENTAL_SNAPSHOT_TIMEOUT_SECS,
-                };
-                std::cmp::max(computed, fallback)
-            })
-        });
-
         RequestMiddlewareAction::Respond {
             should_validate_hosts: true,
-            response: Box::pin(async move {
+            response: Box::pin(async {
                 match Self::open_no_follow(filename).await {
                     Err(err) => Ok(if err.kind() == std::io::ErrorKind::NotFound {
                         Self::not_found()
@@ -309,11 +221,8 @@ impl RpcRequestMiddleware {
                     Ok(file) => {
                         let stream =
                             FramedRead::new(file, BytesCodec::new()).map_ok(|b| b.freeze());
-                        let body = if let Some(timeout) = snapshot_timeout {
-                            hyper::Body::wrap_stream(TimeoutStream::new(stream, timeout))
-                        } else {
-                            hyper::Body::wrap_stream(stream)
-                        };
+                        let body = hyper::Body::wrap_stream(stream);
+
                         Ok(hyper::Response::builder()
                             .header(hyper::header::CONTENT_LENGTH, file_length)
                             .body(body)
@@ -383,8 +292,12 @@ impl RequestMiddleware for RpcRequestMiddleware {
             }
         }
 
-        if let Some(path) = match_supply_path(request.uri().path()) {
-            process_rest(&self.bank_forks, path)
+        if let Some(result) = process_rest(&self.bank_forks, request.uri().path()) {
+            hyper::Response::builder()
+                .status(hyper::StatusCode::OK)
+                .body(hyper::Body::from(result))
+                .unwrap()
+                .into()
         } else if self.is_file_get_path(request.uri().path()) {
             self.process_file_get(request.uri().path())
         } else if request.uri().path() == "/health" {
@@ -399,39 +312,19 @@ impl RequestMiddleware for RpcRequestMiddleware {
     }
 }
 
-fn match_supply_path(path: &str) -> Option<&str> {
-    match path {
-        "/v0/circulating-supply" | "/v0/total-supply" => Some(path),
-        _ => None,
-    }
-}
-
-#[derive(Debug)]
-pub enum SupplyCalcError {
-    Scan(String),
-}
-
-async fn calculate_circulating_supply_async(bank: &Arc<Bank>) -> Result<u64, SupplyCalcError> {
-    let total_supply = bank.capitalization();
-    let bank = Arc::clone(bank);
-    let non_circulating_supply =
-        tokio::task::spawn_blocking(move || calculate_non_circulating_supply(&bank))
-            .await
-            .expect("Failed to spawn blocking task")
-            .map_err(|e| SupplyCalcError::Scan(e.to_string()))?;
-
-    Ok(total_supply.saturating_sub(non_circulating_supply.lamports))
-}
-
-async fn handle_rest(bank_forks: &Arc<RwLock<BankForks>>, path: &str) -> Option<String> {
+fn process_rest(bank_forks: &Arc<RwLock<BankForks>>, path: &str) -> Option<String> {
     match path {
         "/v0/circulating-supply" => {
             let bank = bank_forks.read().unwrap().root_bank();
-            let supply_result = calculate_circulating_supply_async(&bank).await;
-            match supply_result {
-                Ok(supply) => Some(format!("{}", lamports_to_sol(supply))),
-                Err(_) => None,
-            }
+            let total_supply = bank.capitalization();
+            let non_circulating_supply =
+                solana_runtime::non_circulating_supply::calculate_non_circulating_supply(&bank)
+                    .expect("Scan should not error on root banks")
+                    .lamports;
+            Some(format!(
+                "{}",
+                lamports_to_sol(total_supply - non_circulating_supply)
+            ))
         }
         "/v0/total-supply" => {
             let bank = bank_forks.read().unwrap().root_bank();
@@ -442,172 +335,7 @@ async fn handle_rest(bank_forks: &Arc<RwLock<BankForks>>, path: &str) -> Option<
     }
 }
 
-fn process_rest(bank_forks: &Arc<RwLock<BankForks>>, path: &str) -> RequestMiddlewareAction {
-    let bank_forks = bank_forks.clone();
-    let path = path.to_string();
-
-    RequestMiddlewareAction::Respond {
-        should_validate_hosts: true,
-        response: Box::pin(async move {
-            let result = handle_rest(&bank_forks, path.as_str()).await;
-            match result {
-                Some(s) => Ok(hyper::Response::builder()
-                    .status(hyper::StatusCode::OK)
-                    .body(hyper::Body::from(s))
-                    .unwrap()),
-                None => Ok(RpcRequestMiddleware::not_found()),
-            }
-        }),
-    }
-}
-
-/// [`JsonRpcServiceConfig`] is a helper structure that simplifies the creation
-/// of a [`JsonRpcService`] with a target TPU client specified by
-/// `client_option`.
-pub struct JsonRpcServiceConfig<'a> {
-    pub rpc_addr: SocketAddr,
-    pub rpc_config: JsonRpcConfig,
-    pub snapshot_config: Option<SnapshotConfig>,
-    pub bank_forks: Arc<RwLock<BankForks>>,
-    pub block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-    pub blockstore: Arc<Blockstore>,
-    pub cluster_info: Arc<ClusterInfo>,
-    pub poh_recorder: Option<Arc<RwLock<PohRecorder>>>,
-    pub genesis_hash: Hash,
-    pub ledger_path: PathBuf,
-    pub validator_exit: Arc<RwLock<Exit>>,
-    pub exit: Arc<AtomicBool>,
-    pub override_health_check: Arc<AtomicBool>,
-    pub startup_verification_complete: Arc<AtomicBool>,
-    pub optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
-    pub send_transaction_service_config: send_transaction_service::Config,
-    pub max_slots: Arc<MaxSlots>,
-    pub leader_schedule_cache: Arc<LeaderScheduleCache>,
-    pub max_complete_transaction_status_slot: Arc<AtomicU64>,
-    pub max_complete_rewards_slot: Arc<AtomicU64>,
-    pub prioritization_fee_cache: Arc<PrioritizationFeeCache>,
-    pub client_option: ClientOption<'a>,
-}
-
-/// [`ClientOption`] enum represents the available client types for TPU
-/// communication:
-/// * [`ConnectionCacheClient`]: Uses a shared [`ConnectionCache`] to manage
-///   connections efficiently.
-/// * [`TpuClientNextClient`]: Relies on the `tpu-client-next` crate and
-///   requires a reference to a [`Keypair`].
-pub enum ClientOption<'a> {
-    ConnectionCache(Arc<ConnectionCache>),
-    TpuClientNext(&'a Keypair, UdpSocket, RuntimeHandle, CancellationToken),
-}
-
 impl JsonRpcService {
-    pub fn new_with_config(config: JsonRpcServiceConfig) -> Result<Self, String> {
-        let runtime = service_runtime(
-            config.rpc_config.rpc_threads,
-            config.rpc_config.rpc_blocking_threads,
-            config.rpc_config.rpc_niceness_adj,
-        );
-        let leader_info = config
-            .poh_recorder
-            .map(|recorder| ClusterTpuInfo::new(config.cluster_info.clone(), recorder));
-
-        match config.client_option {
-            ClientOption::ConnectionCache(connection_cache) => {
-                let my_tpu_address = config
-                    .cluster_info
-                    .my_contact_info()
-                    .tpu(connection_cache.protocol())
-                    .ok_or(format!(
-                        "Invalid {:?} socket address for TPU",
-                        connection_cache.protocol()
-                    ))?;
-                let client = ConnectionCacheClient::new(
-                    connection_cache,
-                    my_tpu_address,
-                    config.send_transaction_service_config.tpu_peers.clone(),
-                    leader_info,
-                    config.send_transaction_service_config.leader_forward_count,
-                );
-                let json_rpc_service = Self::new_with_client(
-                    config.rpc_addr,
-                    config.rpc_config,
-                    config.snapshot_config,
-                    config.bank_forks,
-                    config.block_commitment_cache,
-                    config.blockstore,
-                    config.cluster_info,
-                    config.genesis_hash,
-                    config.ledger_path.as_path(),
-                    config.validator_exit,
-                    config.exit,
-                    config.override_health_check,
-                    config.startup_verification_complete,
-                    config.optimistically_confirmed_bank,
-                    config.send_transaction_service_config,
-                    config.max_slots,
-                    config.leader_schedule_cache,
-                    client.clone(),
-                    config.max_complete_transaction_status_slot,
-                    config.max_complete_rewards_slot,
-                    config.prioritization_fee_cache,
-                    runtime,
-                )?;
-                Ok(json_rpc_service)
-            }
-            ClientOption::TpuClientNext(
-                identity_keypair,
-                tpu_client_socket,
-                client_runtime,
-                cancel,
-            ) => {
-                let my_tpu_address = config
-                    .cluster_info
-                    .my_contact_info()
-                    .tpu(Protocol::QUIC)
-                    .ok_or(format!(
-                        "Invalid {:?} socket address for TPU",
-                        Protocol::QUIC
-                    ))?;
-                let client = TpuClientNextClient::new(
-                    client_runtime,
-                    my_tpu_address,
-                    config.send_transaction_service_config.tpu_peers.clone(),
-                    leader_info,
-                    config.send_transaction_service_config.leader_forward_count,
-                    Some(identity_keypair),
-                    tpu_client_socket,
-                    cancel,
-                );
-
-                let json_rpc_service = Self::new_with_client(
-                    config.rpc_addr,
-                    config.rpc_config.clone(),
-                    config.snapshot_config,
-                    config.bank_forks.clone(),
-                    config.block_commitment_cache.clone(),
-                    config.blockstore.clone(),
-                    config.cluster_info.clone(),
-                    config.genesis_hash,
-                    config.ledger_path.as_path(),
-                    config.validator_exit,
-                    config.exit,
-                    config.override_health_check,
-                    config.startup_verification_complete,
-                    config.optimistically_confirmed_bank,
-                    config.send_transaction_service_config,
-                    config.max_slots,
-                    config.leader_schedule_cache,
-                    client,
-                    config.max_complete_transaction_status_slot,
-                    config.max_complete_rewards_slot,
-                    config.prioritization_fee_cache,
-                    runtime,
-                )?;
-                Ok(json_rpc_service)
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         rpc_addr: SocketAddr,
@@ -633,92 +361,9 @@ impl JsonRpcService {
         max_complete_rewards_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     ) -> Result<Self, String> {
-        let runtime = service_runtime(
-            config.rpc_threads,
-            config.rpc_blocking_threads,
-            config.rpc_niceness_adj,
-        );
-
-        let tpu_address = cluster_info
-            .my_contact_info()
-            .tpu(connection_cache.protocol())
-            .ok_or_else(|| {
-                format!(
-                    "Invalid {:?} socket address for TPU",
-                    connection_cache.protocol()
-                )
-            })?;
-
-        let leader_info =
-            poh_recorder.map(|recorder| ClusterTpuInfo::new(cluster_info.clone(), recorder));
-        let client = ConnectionCacheClient::new(
-            connection_cache,
-            tpu_address,
-            send_transaction_service_config.tpu_peers.clone(),
-            leader_info,
-            send_transaction_service_config.leader_forward_count,
-        );
-        let json_rpc_service = Self::new_with_client(
-            rpc_addr,
-            config,
-            snapshot_config,
-            bank_forks,
-            block_commitment_cache,
-            blockstore,
-            cluster_info,
-            genesis_hash,
-            ledger_path,
-            validator_exit,
-            exit,
-            override_health_check,
-            startup_verification_complete,
-            optimistically_confirmed_bank,
-            send_transaction_service_config,
-            max_slots,
-            leader_schedule_cache,
-            client.clone(),
-            max_complete_transaction_status_slot,
-            max_complete_rewards_slot,
-            prioritization_fee_cache,
-            runtime,
-        )?;
-        Ok(json_rpc_service)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_client<
-        Client: TransactionClient
-            + NotifyKeyUpdate
-            + Clone
-            + std::marker::Send
-            + std::marker::Sync
-            + 'static,
-    >(
-        rpc_addr: SocketAddr,
-        config: JsonRpcConfig,
-        snapshot_config: Option<SnapshotConfig>,
-        bank_forks: Arc<RwLock<BankForks>>,
-        block_commitment_cache: Arc<RwLock<BlockCommitmentCache>>,
-        blockstore: Arc<Blockstore>,
-        cluster_info: Arc<ClusterInfo>,
-        genesis_hash: Hash,
-        ledger_path: &Path,
-        validator_exit: Arc<RwLock<Exit>>,
-        exit: Arc<AtomicBool>,
-        override_health_check: Arc<AtomicBool>,
-        startup_verification_complete: Arc<AtomicBool>,
-        optimistically_confirmed_bank: Arc<RwLock<OptimisticallyConfirmedBank>>,
-        send_transaction_service_config: send_transaction_service::Config,
-        max_slots: Arc<MaxSlots>,
-        leader_schedule_cache: Arc<LeaderScheduleCache>,
-        client: Client,
-        max_complete_transaction_status_slot: Arc<AtomicU64>,
-        max_complete_rewards_slot: Arc<AtomicU64>,
-        prioritization_fee_cache: Arc<PrioritizationFeeCache>,
-        runtime: Arc<TokioRuntime>,
-    ) -> Result<Self, String> {
         info!("rpc bound to {:?}", rpc_addr);
         info!("rpc configuration: {:?}", config);
+        let rpc_threads = 1.max(config.rpc_threads);
         let rpc_niceness_adj = config.rpc_niceness_adj;
 
         let health = Arc::new(RpcHealth::new(
@@ -732,6 +377,27 @@ impl JsonRpcService {
         let largest_accounts_cache = Arc::new(RwLock::new(LargestAccountsCache::new(
             LARGEST_ACCOUNTS_CACHE_DURATION,
         )));
+
+        let tpu_address = cluster_info
+            .my_contact_info()
+            .tpu(connection_cache.protocol())
+            .map_err(|err| format!("{err}"))?;
+
+        // sadly, some parts of our current rpc implemention block the jsonrpc's
+        // _socket-listening_ event loop for too long, due to (blocking) long IO or intesive CPU,
+        // causing no further processing of incoming requests and ultimatily innocent clients timing-out.
+        // So create a (shared) multi-threaded event_loop for jsonrpc and set its .threads() to 1,
+        // so that we avoid the single-threaded event loops from being created automatically by
+        // jsonrpc for threads when .threads(N > 1) is given.
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(rpc_threads)
+                .on_thread_start(move || renice_this_thread(rpc_niceness_adj).unwrap())
+                .thread_name("solRpcEl")
+                .enable_all()
+                .build()
+                .expect("Runtime"),
+        );
 
         let exit_bigtable_ledger_upload_service = Arc::new(AtomicBool::new(false));
 
@@ -788,6 +454,7 @@ impl JsonRpcService {
             };
 
         let full_api = config.full_api;
+        let obsolete_v1_7_api = config.obsolete_v1_7_api;
         let max_request_body_size = config
             .max_request_body_size
             .unwrap_or(MAX_REQUEST_BODY_SIZE);
@@ -809,13 +476,16 @@ impl JsonRpcService {
             max_complete_transaction_status_slot,
             max_complete_rewards_slot,
             prioritization_fee_cache,
-            Arc::clone(&runtime),
         );
 
-        let _send_transaction_service = Arc::new(SendTransactionService::new_with_client(
+        let leader_info =
+            poh_recorder.map(|recorder| ClusterTpuInfo::new(cluster_info.clone(), recorder));
+        let _send_transaction_service = Arc::new(SendTransactionService::new_with_config(
+            tpu_address,
             &bank_forks,
+            leader_info,
             receiver,
-            client.clone(),
+            &connection_cache,
             send_transaction_service_config,
             exit,
         ));
@@ -839,6 +509,12 @@ impl JsonRpcService {
                     io.extend_with(rpc_accounts::AccountsDataImpl.to_delegate());
                     io.extend_with(rpc_accounts_scan::AccountsScanImpl.to_delegate());
                     io.extend_with(rpc_full::FullImpl.to_delegate());
+                    io.extend_with(rpc_deprecated_v1_7::DeprecatedV1_7Impl.to_delegate());
+                    io.extend_with(rpc_deprecated_v1_9::DeprecatedV1_9Impl.to_delegate());
+                    io.extend_with(rpc_deprecated_v1_18::DeprecatedV1_18Impl.to_delegate());
+                }
+                if obsolete_v1_7_api {
+                    io.extend_with(rpc_obsolete_v1_7::ObsoleteV1_7Impl.to_delegate());
                 }
 
                 let request_middleware = RpcRequestMiddleware::new(
@@ -849,14 +525,7 @@ impl JsonRpcService {
                 );
                 let server = ServerBuilder::with_meta_extractor(
                     io,
-                    move |req: &hyper::Request<hyper::Body>| {
-                        let xbigtable = req.headers().get("x-bigtable");
-                        if xbigtable.is_some_and(|v| v == "disabled") {
-                            request_processor.clone_without_bigtable()
-                        } else {
-                            request_processor.clone()
-                        }
-                    },
+                    move |_req: &hyper::Request<hyper::Body>| request_processor.clone(),
                 )
                 .event_loop_executor(runtime.handle().clone())
                 .threads(1)
@@ -899,7 +568,6 @@ impl JsonRpcService {
             #[cfg(test)]
             request_processor: test_request_processor,
             close_handle: Some(close_handle),
-            client_updater: Arc::new(client) as Arc<dyn NotifyKeyUpdate + Send + Sync>,
         })
     }
 
@@ -913,46 +581,6 @@ impl JsonRpcService {
         self.exit();
         self.thread_hdl.join()
     }
-
-    pub fn get_client_key_updater(&self) -> Arc<dyn NotifyKeyUpdate + Send + Sync> {
-        self.client_updater.clone()
-    }
-}
-
-pub fn service_runtime(
-    rpc_threads: usize,
-    rpc_blocking_threads: usize,
-    rpc_niceness_adj: i8,
-) -> Arc<TokioRuntime> {
-    // The jsonrpc_http_server crate supports two execution models:
-    //
-    // - By default, it spawns a number of threads - configured with .threads(N) - and runs a
-    //   single-threaded futures executor in each thread.
-    // - Alternatively when configured with .event_loop_executor(executor) and .threads(1),
-    //   it executes all the tasks on the given executor, not spawning any extra internal threads.
-    //
-    // We use the latter configuration, using a multi threaded tokio runtime as the executor. We
-    // do this so we can configure the number of worker threads, the number of blocking threads
-    // and then use tokio::task::spawn_blocking() to avoid blocking the worker threads on CPU
-    // bound operations like getMultipleAccounts. This results in reduced latency, since fast
-    // rpc calls (the majority) are not blocked by slow CPU bound ones.
-    //
-    // NB: `rpc_blocking_threads` shouldn't be set too high (defaults to num_cpus / 2). Too many
-    // (busy) blocking threads could compete with CPU time with other validator threads and
-    // negatively impact performance.
-    let rpc_threads = 1.max(rpc_threads);
-    let rpc_blocking_threads = 1.max(rpc_blocking_threads);
-    let runtime = Arc::new(
-        TokioBuilder::new_multi_thread()
-            .worker_threads(rpc_threads)
-            .max_blocking_threads(rpc_blocking_threads)
-            .on_thread_start(move || renice_this_thread(rpc_niceness_adj).unwrap())
-            .thread_name("solRpcEl")
-            .enable_all()
-            .build()
-            .expect("Runtime"),
-    );
-    runtime
 }
 
 #[cfg(test)]
@@ -960,14 +588,16 @@ mod tests {
     use {
         super::*,
         crate::rpc::{create_validator_exit, tests::new_test_cluster_info},
-        solana_genesis_config::{ClusterType, DEFAULT_GENESIS_ARCHIVE},
         solana_ledger::{
             genesis_utils::{create_genesis_config, GenesisConfigInfo},
             get_tmp_ledger_path_auto_delete,
         },
         solana_rpc_client_api::config::RpcContextConfig,
         solana_runtime::bank::Bank,
-        solana_signer::Signer,
+        solana_sdk::{
+            genesis_config::{ClusterType, DEFAULT_GENESIS_ARCHIVE},
+            signature::Signer,
+        },
         std::{
             io::Write,
             net::{IpAddr, Ipv4Addr},
@@ -1054,25 +684,12 @@ mod tests {
     #[test]
     fn test_process_rest_api() {
         let bank_forks = create_bank_forks();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        runtime.block_on(async {
-            assert_eq!(
-                None,
-                handle_rest(&bank_forks, "not-a-supported-rest-api").await
-            );
-
-            let circulating_supply = handle_rest(&bank_forks, "/v0/circulating-supply").await;
-            assert!(circulating_supply.is_some());
-
-            let total_supply = handle_rest(&bank_forks, "/v0/total-supply").await;
-            assert!(total_supply.is_some());
-
-            assert_eq!(
-                handle_rest(&bank_forks, "/v0/circulating-supply").await,
-                handle_rest(&bank_forks, "/v0/total-supply").await
-            );
-        });
+        assert_eq!(None, process_rest(&bank_forks, "not-a-supported-rest-api"));
+        assert_eq!(
+            process_rest(&bank_forks, "/v0/circulating-supply"),
+            process_rest(&bank_forks, "/v0/total-supply")
+        );
     }
 
     #[test]
@@ -1254,21 +871,24 @@ mod tests {
             panic!("Unexpected RequestMiddlewareAction variant");
         }
 
-        std::fs::remove_file(&genesis_path).unwrap();
+        #[cfg(unix)]
         {
-            let mut file = std::fs::File::create(ledger_path.path().join("wrong")).unwrap();
-            file.write_all(b"wrong file").unwrap();
-        }
-        symlink::symlink_file("wrong", &genesis_path).unwrap();
+            std::fs::remove_file(&genesis_path).unwrap();
+            {
+                let mut file = std::fs::File::create(ledger_path.path().join("wrong")).unwrap();
+                file.write_all(b"wrong file").unwrap();
+            }
+            symlink::symlink_file("wrong", &genesis_path).unwrap();
 
-        // File is a symbolic link => request should fail.
-        let action = rrm.process_file_get(DEFAULT_GENESIS_DOWNLOAD_PATH);
-        if let RequestMiddlewareAction::Respond { response, .. } = action {
-            let response = runtime.block_on(response);
-            let response = response.unwrap();
-            assert_ne!(response.status(), 200);
-        } else {
-            panic!("Unexpected RequestMiddlewareAction variant");
+            // File is a symbolic link => request should fail.
+            let action = rrm.process_file_get(DEFAULT_GENESIS_DOWNLOAD_PATH);
+            if let RequestMiddlewareAction::Respond { response, .. } = action {
+                let response = runtime.block_on(response);
+                let response = response.unwrap();
+                assert_ne!(response.status(), 200);
+            } else {
+                panic!("Unexpected RequestMiddlewareAction variant");
+            }
         }
     }
 }

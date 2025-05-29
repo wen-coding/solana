@@ -1,6 +1,7 @@
 use {
     super::*,
-    solana_message::AccountKeys,
+    crate::blockstore_db::ColumnIndexDeprecation,
+    solana_sdk::message::AccountKeys,
     std::{cmp::max, time::Instant},
 };
 
@@ -8,7 +9,7 @@ use {
 pub struct PurgeStats {
     delete_range: u64,
     write_batch: u64,
-    delete_file_in_range: u64,
+    delete_files_in_range: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -50,8 +51,8 @@ impl Blockstore {
             ("delete_range_us", purge_stats.delete_range as i64, i64),
             ("write_batch_us", purge_stats.write_batch as i64, i64),
             (
-                "delete_file_in_range_us",
-                purge_stats.delete_file_in_range as i64,
+                "delete_files_in_range_us",
+                purge_stats.delete_files_in_range as i64,
                 i64
             )
         );
@@ -123,7 +124,11 @@ impl Blockstore {
                     slot,
                     from_slot..=to_slot
                 );
-                self.put_meta(slot, &meta).expect("couldn't update meta");
+                self.put_meta_bytes(
+                    slot,
+                    &bincode::serialize(&meta).expect("couldn't update meta"),
+                )
+                .expect("couldn't update meta");
             }
             time.stop();
             total_retain_us += time.as_us();
@@ -150,7 +155,7 @@ impl Blockstore {
         let Some(mut slot_meta) = self.meta(slot)? else {
             return Err(BlockstoreError::SlotUnavailable);
         };
-        let mut write_batch = self.get_write_batch()?;
+        let mut write_batch = self.db.batch()?;
 
         let columns_purged = self.purge_range(&mut write_batch, slot, slot, PurgeType::Exact)?;
 
@@ -162,22 +167,21 @@ impl Blockstore {
                 parent_slot_meta
                     .next_slots
                     .retain(|&next_slot| next_slot != slot);
-                self.meta_cf
-                    .put_in_batch(&mut write_batch, parent_slot, &parent_slot_meta)?;
+                write_batch.put::<cf::SlotMeta>(parent_slot, &parent_slot_meta)?;
             } else {
                 error!(
-                    "Parent slot meta {parent_slot} for child {slot} is missing or cleaned up. \
-                     Falling back to orphan repair to remedy the situation",
+                    "Parent slot meta {} for child {} is missing  or cleaned up.
+                       Falling back to orphan repair to remedy the situation",
+                    parent_slot, slot
                 );
             }
         }
 
         // Retain a SlotMeta for `slot` with the `next_slots` field retained
         slot_meta.clear_unconfirmed_slot();
-        self.meta_cf
-            .put_in_batch(&mut write_batch, slot, &slot_meta)?;
+        write_batch.put::<cf::SlotMeta>(slot, &slot_meta)?;
 
-        self.write_batch(write_batch).inspect_err(|e| {
+        self.db.write(write_batch).inspect_err(|e| {
             error!(
                 "Error: {:?} while submitting write batch for slot {:?}",
                 e, slot
@@ -202,14 +206,14 @@ impl Blockstore {
         purge_type: PurgeType,
         purge_stats: &mut PurgeStats,
     ) -> Result<bool> {
-        let mut write_batch = self.get_write_batch()?;
+        let mut write_batch = self.db.batch()?;
 
         let mut delete_range_timer = Measure::start("delete_range");
         let columns_purged = self.purge_range(&mut write_batch, from_slot, to_slot, purge_type)?;
         delete_range_timer.stop();
 
         let mut write_timer = Measure::start("write_batch");
-        self.write_batch(write_batch).inspect_err(|e| {
+        self.db.write(write_batch).inspect_err(|e| {
             error!(
                 "Error: {:?} while submitting write batch for purge from_slot {} to_slot {}",
                 e, from_slot, to_slot
@@ -236,7 +240,7 @@ impl Blockstore {
 
         purge_stats.delete_range += delete_range_timer.as_us();
         purge_stats.write_batch += write_timer.as_us();
-        purge_stats.delete_file_in_range += purge_files_in_range_timer.as_us();
+        purge_stats.delete_files_in_range += purge_files_in_range_timer.as_us();
 
         Ok(columns_purged)
     }
@@ -249,68 +253,68 @@ impl Blockstore {
         purge_type: PurgeType,
     ) -> Result<bool> {
         let columns_purged = self
-            .meta_cf
-            .delete_range_in_batch(write_batch, from_slot, to_slot)
+            .db
+            .delete_range_cf::<cf::SlotMeta>(write_batch, from_slot, to_slot)
             .is_ok()
             & self
-                .bank_hash_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::BankHash>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .roots_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::Root>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .data_shred_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::ShredData>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .code_shred_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::ShredCode>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .dead_slots_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::DeadSlots>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .duplicate_slots_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::DuplicateSlots>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .erasure_meta_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::ErasureMeta>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .orphans_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::Orphans>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .index_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::Index>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .rewards_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::Rewards>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .blocktime_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::Blocktime>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .perf_samples_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::PerfSamples>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .block_height_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::BlockHeight>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .optimistic_slots_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::OptimisticSlots>(write_batch, from_slot, to_slot)
                 .is_ok()
             & self
-                .merkle_root_meta_cf
-                .delete_range_in_batch(write_batch, from_slot, to_slot)
+                .db
+                .delete_range_cf::<cf::MerkleRootMeta>(write_batch, from_slot, to_slot)
                 .is_ok();
 
         match purge_type {
@@ -329,68 +333,68 @@ impl Blockstore {
     }
 
     fn purge_files_in_range(&self, from_slot: Slot, to_slot: Slot) -> bool {
-        self.meta_cf
-            .delete_file_in_range(from_slot, to_slot)
+        self.db
+            .delete_file_in_range_cf::<cf::SlotMeta>(from_slot, to_slot)
             .is_ok()
             & self
-                .bank_hash_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::BankHash>(from_slot, to_slot)
                 .is_ok()
             & self
-                .roots_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::Root>(from_slot, to_slot)
                 .is_ok()
             & self
-                .data_shred_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::ShredData>(from_slot, to_slot)
                 .is_ok()
             & self
-                .code_shred_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::ShredCode>(from_slot, to_slot)
                 .is_ok()
             & self
-                .dead_slots_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::DeadSlots>(from_slot, to_slot)
                 .is_ok()
             & self
-                .duplicate_slots_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::DuplicateSlots>(from_slot, to_slot)
                 .is_ok()
             & self
-                .erasure_meta_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::ErasureMeta>(from_slot, to_slot)
                 .is_ok()
             & self
-                .orphans_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::Orphans>(from_slot, to_slot)
                 .is_ok()
             & self
-                .index_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::Index>(from_slot, to_slot)
                 .is_ok()
             & self
-                .rewards_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::Rewards>(from_slot, to_slot)
                 .is_ok()
             & self
-                .blocktime_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::Blocktime>(from_slot, to_slot)
                 .is_ok()
             & self
-                .perf_samples_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::PerfSamples>(from_slot, to_slot)
                 .is_ok()
             & self
-                .block_height_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::BlockHeight>(from_slot, to_slot)
                 .is_ok()
             & self
-                .optimistic_slots_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::OptimisticSlots>(from_slot, to_slot)
                 .is_ok()
             & self
-                .merkle_root_meta_cf
-                .delete_file_in_range(from_slot, to_slot)
+                .db
+                .delete_file_in_range_cf::<cf::MerkleRootMeta>(from_slot, to_slot)
                 .is_ok()
     }
 
@@ -451,24 +455,27 @@ impl Blockstore {
         for slot in from_slot..=to_slot {
             let primary_indexes = slot_indexes(slot);
 
-            let (slot_entries, _, _) =
-                self.get_slot_entries_with_shred_info(slot, 0, true /* allow_dead_slots */)?;
+            let slot_entries = self.get_any_valid_slot_entries(slot, 0);
             let transactions = slot_entries
                 .into_iter()
                 .flat_map(|entry| entry.transactions);
             for (i, transaction) in transactions.enumerate() {
                 if let Some(&signature) = transaction.signatures.first() {
-                    self.transaction_status_cf
-                        .delete_in_batch(batch, (signature, slot))?;
-                    self.transaction_memos_cf
-                        .delete_in_batch(batch, (signature, slot))?;
+                    batch.delete::<cf::TransactionStatus>((signature, slot))?;
+                    batch.delete::<cf::TransactionMemos>((signature, slot))?;
                     if !primary_indexes.is_empty() {
-                        self.transaction_memos_cf
-                            .delete_deprecated_in_batch(batch, signature)?;
+                        batch.delete_raw::<cf::TransactionMemos>(
+                            &cf::TransactionMemos::deprecated_key(signature),
+                        )?;
                     }
                     for primary_index in &primary_indexes {
-                        self.transaction_status_cf
-                            .delete_deprecated_in_batch(batch, (*primary_index, signature, slot))?;
+                        batch.delete_raw::<cf::TransactionStatus>(
+                            &cf::TransactionStatus::deprecated_key((
+                                *primary_index,
+                                signature,
+                                slot,
+                            )),
+                        )?;
                     }
 
                     let meta = self.read_transaction_status((signature, slot))?;
@@ -481,14 +488,20 @@ impl Blockstore {
                     let transaction_index =
                         u32::try_from(i).map_err(|_| BlockstoreError::TransactionIndexOverflow)?;
                     for pubkey in account_keys.iter() {
-                        self.address_signatures_cf.delete_in_batch(
-                            batch,
-                            (*pubkey, slot, transaction_index, signature),
-                        )?;
+                        batch.delete::<cf::AddressSignatures>((
+                            *pubkey,
+                            slot,
+                            transaction_index,
+                            signature,
+                        ))?;
                         for primary_index in &primary_indexes {
-                            self.address_signatures_cf.delete_deprecated_in_batch(
-                                batch,
-                                (*primary_index, *pubkey, slot, signature),
+                            batch.delete_raw::<cf::AddressSignatures>(
+                                &cf::AddressSignatures::deprecated_key((
+                                    *primary_index,
+                                    *pubkey,
+                                    slot,
+                                    signature,
+                                )),
                             )?;
                         }
                     }
@@ -498,14 +511,12 @@ impl Blockstore {
         let mut update_highest_primary_index_slot = false;
         if index0.max_slot >= from_slot && index0.max_slot <= to_slot {
             index0.max_slot = from_slot.saturating_sub(1);
-            self.transaction_status_index_cf
-                .put_in_batch(batch, 0, &index0)?;
+            batch.put::<cf::TransactionStatusIndex>(0, &index0)?;
             update_highest_primary_index_slot = true;
         }
         if index1.max_slot >= from_slot && index1.max_slot <= to_slot {
             index1.max_slot = from_slot.saturating_sub(1);
-            self.transaction_status_index_cf
-                .put_in_batch(batch, 1, &index1)?;
+            batch.put::<cf::TransactionStatusIndex>(1, &index1)?;
             update_highest_primary_index_slot = true
         }
         if update_highest_primary_index_slot {
@@ -524,10 +535,11 @@ pub mod tests {
         },
         bincode::serialize,
         solana_entry::entry::next_entry_mut,
-        solana_hash::Hash,
-        solana_message::Message,
-        solana_sha256_hasher::hash,
-        solana_transaction::Transaction,
+        solana_sdk::{
+            hash::{hash, Hash},
+            message::Message,
+            transaction::Transaction,
+        },
         test_case::test_case,
     };
 
@@ -569,11 +581,8 @@ pub mod tests {
                 .write_transaction_status(
                     x,
                     Signature::from(random_bytes),
-                    vec![
-                        (&Pubkey::try_from(&random_bytes[..32]).unwrap(), true),
-                        (&Pubkey::try_from(&random_bytes[32..]).unwrap(), false),
-                    ]
-                    .into_iter(),
+                    vec![&Pubkey::try_from(&random_bytes[..32]).unwrap()],
+                    vec![&Pubkey::try_from(&random_bytes[32..]).unwrap()],
                     TransactionStatusMeta::default(),
                     0,
                 )
@@ -584,8 +593,8 @@ pub mod tests {
         blockstore.run_purge(10, 20, PurgeType::Exact).unwrap();
 
         let status_entries: Vec<_> = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap()
             .collect();
         assert_eq!(status_entries.len(), 10);
@@ -594,8 +603,8 @@ pub mod tests {
     fn clear_and_repopulate_transaction_statuses_for_test(blockstore: &Blockstore, max_slot: u64) {
         blockstore.run_purge(0, max_slot, PurgeType::Exact).unwrap();
         let mut iter = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         assert_eq!(iter.next(), None);
 
@@ -630,11 +639,8 @@ pub mod tests {
                 .write_transaction_status(
                     x,
                     signature,
-                    vec![
-                        (&Pubkey::try_from(&random_bytes[..32]).unwrap(), true),
-                        (&Pubkey::try_from(&random_bytes[32..]).unwrap(), false),
-                    ]
-                    .into_iter(),
+                    vec![&Pubkey::try_from(&random_bytes[..32]).unwrap()],
+                    vec![&Pubkey::try_from(&random_bytes[32..]).unwrap()],
                     TransactionStatusMeta::default(),
                     0,
                 )
@@ -708,11 +714,8 @@ pub mod tests {
                     .write_transaction_status(
                         slot,
                         transaction.signatures[0],
-                        transaction
-                            .message
-                            .static_account_keys()
-                            .iter()
-                            .map(|key| (key, true)),
+                        transaction.message.static_account_keys().iter().collect(),
+                        vec![],
                         TransactionStatusMeta::default(),
                         0,
                     )
@@ -745,8 +748,8 @@ pub mod tests {
         blockstore.run_purge(10, 12, PurgeType::Exact).unwrap();
 
         let mut status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         for _ in 0..max_slot + 1 {
             let entry = status_entry_iterator.next().unwrap().0;
@@ -760,8 +763,8 @@ pub mod tests {
         blockstore.run_purge(2, 4, PurgeType::Exact).unwrap();
 
         let mut status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         for _ in 0..7 {
             // 7 entries remaining
@@ -778,8 +781,8 @@ pub mod tests {
             .unwrap();
 
         let mut status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         let entry = status_entry_iterator.next().unwrap().0;
         assert_eq!(entry.1, 9);
@@ -791,10 +794,26 @@ pub mod tests {
         blockstore.run_purge(0, 22, PurgeType::Exact).unwrap();
 
         let mut status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         assert_eq!(status_entry_iterator.next(), None);
+    }
+
+    fn get_index_bounds(blockstore: &Blockstore) -> (Box<[u8]>, Box<[u8]>) {
+        let first_index = {
+            let mut status_entry_iterator = blockstore
+                .transaction_status_cf
+                .iterator_cf_raw_key(IteratorMode::Start);
+            status_entry_iterator.next().unwrap().unwrap().0
+        };
+        let last_index = {
+            let mut status_entry_iterator = blockstore
+                .transaction_status_cf
+                .iterator_cf_raw_key(IteratorMode::End);
+            status_entry_iterator.next().unwrap().unwrap().0
+        };
+        (first_index, last_index)
     }
 
     fn purge_exact(blockstore: &Blockstore, oldest_slot: Slot) {
@@ -804,8 +823,11 @@ pub mod tests {
     }
 
     fn purge_compaction_filter(blockstore: &Blockstore, oldest_slot: Slot) {
+        let (first_index, last_index) = get_index_bounds(blockstore);
         blockstore.db.set_oldest_slot(oldest_slot);
-        blockstore.transaction_status_cf.compact();
+        blockstore
+            .db
+            .compact_range_cf::<cf::TransactionStatus>(&first_index, &last_index);
     }
 
     #[test_case(purge_exact; "exact")]
@@ -841,22 +863,22 @@ pub mod tests {
             .put(1, &index1)
             .unwrap();
 
-        let num_statuses = blockstore
+        let statuses: Vec<_> = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap()
-            .count();
-        assert_eq!(num_statuses, 15);
+            .iterator_cf_raw_key(IteratorMode::Start)
+            .collect();
+        assert_eq!(statuses.len(), 15);
 
         // Delete some of primary-index 0
         let oldest_slot = 3;
         purge(&blockstore, oldest_slot);
         let status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in status_entry_iterator {
+        for entry in status_entry_iterator {
+            let (key, _value) = entry.unwrap();
+            let (_signature, slot) = <cf::TransactionStatus as Column>::index(&key);
             assert!(slot >= oldest_slot);
             count += 1;
         }
@@ -867,10 +889,11 @@ pub mod tests {
         purge(&blockstore, oldest_slot);
         let status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in status_entry_iterator {
+        for entry in status_entry_iterator {
+            let (key, _value) = entry.unwrap();
+            let (_signature, slot) = <cf::TransactionStatus as Column>::index(&key);
             assert!(slot >= oldest_slot);
             count += 1;
         }
@@ -881,10 +904,11 @@ pub mod tests {
         purge(&blockstore, oldest_slot);
         let status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in status_entry_iterator {
+        for entry in status_entry_iterator {
+            let (key, _value) = entry.unwrap();
+            let (_signature, slot) = <cf::TransactionStatus as Column>::index(&key);
             assert!(slot >= oldest_slot);
             count += 1;
         }
@@ -895,10 +919,11 @@ pub mod tests {
         purge(&blockstore, oldest_slot);
         let status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in status_entry_iterator {
+        for entry in status_entry_iterator {
+            let (key, _value) = entry.unwrap();
+            let (_signature, slot) = <cf::TransactionStatus as Column>::index(&key);
             assert!(slot >= oldest_slot);
             count += 1;
         }
@@ -909,10 +934,11 @@ pub mod tests {
         purge(&blockstore, oldest_slot);
         let status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in status_entry_iterator {
+        for entry in status_entry_iterator {
+            let (key, _value) = entry.unwrap();
+            let (_signature, slot) = <cf::TransactionStatus as Column>::index(&key);
             assert!(slot >= oldest_slot);
             count += 1;
         }
@@ -923,8 +949,7 @@ pub mod tests {
         purge(&blockstore, oldest_slot);
         let mut status_entry_iterator = blockstore
             .transaction_status_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         assert!(status_entry_iterator.next().is_none());
     }
 
@@ -952,7 +977,7 @@ pub mod tests {
         );
         blockstore.insert_shreds(shreds, None, false).unwrap();
 
-        let mut write_batch = blockstore.get_write_batch().unwrap();
+        let mut write_batch = blockstore.db.batch().unwrap();
         blockstore
             .purge_special_columns_exact(&mut write_batch, slot, slot + 1)
             .unwrap();
@@ -965,14 +990,31 @@ pub mod tests {
         let max_slot = 19;
 
         clear_and_repopulate_transaction_statuses_for_test(&blockstore, max_slot);
+        let first_index = {
+            let mut status_entry_iterator = blockstore
+                .db
+                .iter::<cf::TransactionStatus>(IteratorMode::Start)
+                .unwrap();
+            status_entry_iterator.next().unwrap().0
+        };
+        let last_index = {
+            let mut status_entry_iterator = blockstore
+                .db
+                .iter::<cf::TransactionStatus>(IteratorMode::End)
+                .unwrap();
+            status_entry_iterator.next().unwrap().0
+        };
 
         let oldest_slot = 3;
         blockstore.db.set_oldest_slot(oldest_slot);
-        blockstore.transaction_status_cf.compact();
+        blockstore.db.compact_range_cf::<cf::TransactionStatus>(
+            &cf::TransactionStatus::key(first_index),
+            &cf::TransactionStatus::key(last_index),
+        );
 
         let status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         let mut count = 0;
         for ((_signature, slot), _value) in status_entry_iterator {
@@ -982,14 +1024,31 @@ pub mod tests {
         assert_eq!(count, max_slot - (oldest_slot - 1));
 
         clear_and_repopulate_transaction_statuses_for_test(&blockstore, max_slot);
+        let first_index = {
+            let mut status_entry_iterator = blockstore
+                .db
+                .iter::<cf::TransactionStatus>(IteratorMode::Start)
+                .unwrap();
+            status_entry_iterator.next().unwrap().0
+        };
+        let last_index = {
+            let mut status_entry_iterator = blockstore
+                .db
+                .iter::<cf::TransactionStatus>(IteratorMode::End)
+                .unwrap();
+            status_entry_iterator.next().unwrap().0
+        };
 
         let oldest_slot = 12;
         blockstore.db.set_oldest_slot(oldest_slot);
-        blockstore.transaction_status_cf.compact();
+        blockstore.db.compact_range_cf::<cf::TransactionStatus>(
+            &cf::TransactionStatus::key(first_index),
+            &cf::TransactionStatus::key(last_index),
+        );
 
         let status_entry_iterator = blockstore
-            .transaction_status_cf
-            .iter(IteratorMode::Start)
+            .db
+            .iter::<cf::TransactionStatus>(IteratorMode::Start)
             .unwrap();
         let mut count = 0;
         for ((_signature, slot), _value) in status_entry_iterator {
@@ -1041,25 +1100,46 @@ pub mod tests {
             )
             .unwrap();
 
+        let first_index = {
+            let mut memos_iterator = blockstore
+                .transaction_memos_cf
+                .iterator_cf_raw_key(IteratorMode::Start);
+            memos_iterator.next().unwrap().unwrap().0
+        };
+        let last_index = {
+            let mut memos_iterator = blockstore
+                .transaction_memos_cf
+                .iterator_cf_raw_key(IteratorMode::End);
+            memos_iterator.next().unwrap().unwrap().0
+        };
+
         // Purge at slot 0 should not affect any memos
         blockstore.db.set_oldest_slot(0);
-        blockstore.transaction_memos_cf.compact();
-        let num_memos = blockstore
+        blockstore
+            .db
+            .compact_range_cf::<cf::TransactionMemos>(&first_index, &last_index);
+        let memos_iterator = blockstore
             .transaction_memos_cf
-            .iter(IteratorMode::Start)
-            .unwrap()
-            .count();
-        assert_eq!(num_memos, 4);
+            .iterator_cf_raw_key(IteratorMode::Start);
+        let mut count = 0;
+        for item in memos_iterator {
+            let _item = item.unwrap();
+            count += 1;
+        }
+        assert_eq!(count, 4);
 
         // Purge at oldest_slot without clean_slot_0 only purges the current memo at slot 4
         blockstore.db.set_oldest_slot(oldest_slot);
-        blockstore.transaction_memos_cf.compact();
+        blockstore
+            .db
+            .compact_range_cf::<cf::TransactionMemos>(&first_index, &last_index);
         let memos_iterator = blockstore
             .transaction_memos_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in memos_iterator {
+        for item in memos_iterator {
+            let (key, _value) = item.unwrap();
+            let slot = <cf::TransactionMemos as Column>::index(&key).1;
             assert!(slot == 0 || slot >= oldest_slot);
             count += 1;
         }
@@ -1067,13 +1147,16 @@ pub mod tests {
 
         // Purge at oldest_slot with clean_slot_0 purges deprecated memos
         blockstore.db.set_clean_slot_0(true);
-        blockstore.transaction_memos_cf.compact();
+        blockstore
+            .db
+            .compact_range_cf::<cf::TransactionMemos>(&first_index, &last_index);
         let memos_iterator = blockstore
             .transaction_memos_cf
-            .iter(IteratorMode::Start)
-            .unwrap();
+            .iterator_cf_raw_key(IteratorMode::Start);
         let mut count = 0;
-        for ((_signature, slot), _value) in memos_iterator {
+        for item in memos_iterator {
+            let (key, _value) = item.unwrap();
+            let slot = <cf::TransactionMemos as Column>::index(&key).1;
             assert!(slot >= oldest_slot);
             count += 1;
         }

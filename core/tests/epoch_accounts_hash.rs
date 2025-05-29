@@ -3,46 +3,48 @@
 
 use {
     crate::snapshot_utils::create_tmp_accounts_dir_for_tests,
-    agave_feature_set as feature_set,
     log::*,
     solana_accounts_db::{
-        accounts_db::CalcAccountsHashDataSource, accounts_hash::CalcAccountsHashConfig,
+        accounts_db::{AccountShrinkThreshold, CalcAccountsHashDataSource},
+        accounts_hash::CalcAccountsHashConfig,
+        accounts_index::AccountSecondaryIndexes,
         epoch_accounts_hash::EpochAccountsHash,
+        starting_snapshot_storages::StartingSnapshotStorages,
     },
-    solana_clock::Slot,
     solana_core::{
         accounts_hash_verifier::AccountsHashVerifier,
-        snapshot_packager_service::{PendingSnapshotPackages, SnapshotPackagerService},
+        snapshot_packager_service::SnapshotPackagerService,
     },
-    solana_epoch_schedule::EpochSchedule,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
-    solana_keypair::Keypair,
-    solana_native_token::LAMPORTS_PER_SOL,
-    solana_pubkey::Pubkey,
     solana_runtime::{
         accounts_background_service::{
-            AbsRequestHandlers, AccountsBackgroundService, DroppedSlotsReceiver,
+            AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService, DroppedSlotsReceiver,
             PrunedBanksRequestHandler, SnapshotRequestHandler,
         },
         bank::{epoch_accounts_hash_utils, Bank},
         bank_forks::BankForks,
         genesis_utils::{self, GenesisConfigInfo},
-        runtime_config::RuntimeConfig,
         snapshot_archive_info::SnapshotArchiveInfoGetter,
         snapshot_bank_utils,
         snapshot_config::SnapshotConfig,
-        snapshot_controller::SnapshotController,
         snapshot_utils,
     },
-    solana_signer::Signer,
+    solana_sdk::{
+        clock::Slot,
+        epoch_schedule::EpochSchedule,
+        native_token::LAMPORTS_PER_SOL,
+        pubkey::Pubkey,
+        signature::{Keypair, Signer},
+        system_transaction,
+        timing::timestamp,
+    },
     solana_streamer::socket::SocketAddrSpace,
-    solana_system_transaction as system_transaction,
-    solana_time_utils::timestamp,
+    solana_svm::runtime_config::RuntimeConfig,
     std::{
         mem::ManuallyDrop,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, Mutex, RwLock,
+            Arc, RwLock,
         },
         time::Duration,
     },
@@ -67,6 +69,9 @@ struct TestEnvironment {
 impl TestEnvironment {
     /// A small, round number to make the tests run quickly, and easy to debug
     const SLOTS_PER_EPOCH: u64 = 400;
+
+    /// A small, round number to ensure accounts packages are sent to the background services
+    const ACCOUNTS_HASH_INTERVAL: u64 = 40;
 
     #[must_use]
     fn new() -> TestEnvironment {
@@ -100,13 +105,6 @@ impl TestEnvironment {
         );
         genesis_config_info.genesis_config.epoch_schedule =
             EpochSchedule::custom(Self::SLOTS_PER_EPOCH, Self::SLOTS_PER_EPOCH, false);
-        // When the accounts lt hash feature is enabled, the EAH is *disabled*.
-        // Disable the accounts lt hash feature by removing its account from genesis.
-        genesis_config_info
-            .genesis_config
-            .accounts
-            .remove(&feature_set::accounts_lt_hash::id())
-            .unwrap();
         let snapshot_config = SnapshotConfig {
             full_snapshot_archives_dir: full_snapshot_archives_dir.path().to_path_buf(),
             incremental_snapshot_archives_dir: incremental_snapshot_archives_dir
@@ -118,6 +116,14 @@ impl TestEnvironment {
 
         let bank_forks =
             BankForks::new_rw_arc(Bank::new_for_tests(&genesis_config_info.genesis_config));
+        bank_forks
+            .write()
+            .unwrap()
+            .set_snapshot_config(Some(snapshot_config.clone()));
+        bank_forks
+            .write()
+            .unwrap()
+            .set_accounts_hash_interval_slots(Self::ACCOUNTS_HASH_INTERVAL);
 
         let exit = Arc::new(AtomicBool::new(false));
         let node_id = Arc::new(Keypair::new());
@@ -159,7 +165,7 @@ impl TestEnvironment {
 struct BackgroundServices {
     exit: Arc<AtomicBool>,
     accounts_background_service: ManuallyDrop<AccountsBackgroundService>,
-    snapshot_controller: Arc<SnapshotController>,
+    accounts_background_request_sender: AbsRequestSender,
     accounts_hash_verifier: ManuallyDrop<AccountsHashVerifier>,
     snapshot_packager_service: ManuallyDrop<SnapshotPackagerService>,
 }
@@ -174,21 +180,15 @@ impl BackgroundServices {
         bank_forks: Arc<RwLock<BankForks>>,
     ) -> Self {
         info!("Starting background services...");
-        let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
-        let snapshot_controller = Arc::new(SnapshotController::new(
-            snapshot_request_sender.clone(),
-            snapshot_config.clone(),
-            bank_forks.read().unwrap().root(),
-        ));
 
-        let pending_snapshot_packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));
+        let (snapshot_package_sender, snapshot_package_receiver) = crossbeam_channel::unbounded();
         let snapshot_packager_service = SnapshotPackagerService::new(
-            pending_snapshot_packages.clone(),
+            snapshot_package_sender.clone(),
+            snapshot_package_receiver,
             None,
             exit.clone(),
-            None,
             cluster_info.clone(),
-            snapshot_controller.clone(),
+            snapshot_config.clone(),
             false,
         );
 
@@ -196,13 +196,18 @@ impl BackgroundServices {
         let accounts_hash_verifier = AccountsHashVerifier::new(
             accounts_package_sender.clone(),
             accounts_package_receiver,
-            pending_snapshot_packages,
+            Some(snapshot_package_sender),
+            StartingSnapshotStorages::Genesis,
             exit.clone(),
-            snapshot_controller.clone(),
+            snapshot_config.clone(),
         );
 
+        let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
+        let accounts_background_request_sender =
+            AbsRequestSender::new(snapshot_request_sender.clone());
         let snapshot_request_handler = SnapshotRequestHandler {
-            snapshot_controller: snapshot_controller.clone(),
+            snapshot_config: snapshot_config.clone(),
+            snapshot_request_sender,
             snapshot_request_receiver,
             accounts_package_sender,
         };
@@ -217,13 +222,14 @@ impl BackgroundServices {
                 pruned_banks_request_handler,
             },
             false,
+            None,
         );
 
         info!("Starting background services... DONE");
         Self {
             exit,
             accounts_background_service: ManuallyDrop::new(accounts_background_service),
-            snapshot_controller,
+            accounts_background_request_sender,
             accounts_hash_verifier: ManuallyDrop::new(accounts_hash_verifier),
             snapshot_packager_service: ManuallyDrop::new(snapshot_packager_service),
         }
@@ -291,15 +297,13 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
         if bank.slot().checked_rem(SET_ROOT_INTERVAL).unwrap() == 0 {
             trace!("rooting bank {}", bank.slot());
             bank_forks.read().unwrap().prune_program_cache(bank.slot());
-            bank_forks
-                .write()
-                .unwrap()
-                .set_root(
-                    bank.slot(),
-                    Some(&test_environment.background_services.snapshot_controller),
-                    None,
-                )
-                .unwrap();
+            bank_forks.write().unwrap().set_root(
+                bank.slot(),
+                &test_environment
+                    .background_services
+                    .accounts_background_request_sender,
+                None,
+            );
         }
 
         // To ensure EAH calculations are correct, calculate the accounts hash here, in-band.
@@ -314,12 +318,14 @@ fn test_epoch_accounts_hash_basic(test_environment: TestEnvironment) {
                     bank.slot(),
                     &CalcAccountsHashConfig {
                         use_bg_thread_pool: false,
+                        check_hash: false,
                         ancestors: Some(&bank.ancestors),
                         epoch_schedule: bank.epoch_schedule(),
                         rent_collector: bank.rent_collector(),
                         store_detailed_debug_info_on_failure: false,
                     },
-                );
+                )
+                .unwrap();
             expected_epoch_accounts_hash = Some(EpochAccountsHash::from(accounts_hash));
             debug!(
                 "slot {}, expected epoch accounts hash: {:?}",
@@ -403,15 +409,13 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
         // Root every bank.  This is what a normal validator does as well.
         // `set_root()` is also what requests snapshots and EAH calculations.
         bank_forks.read().unwrap().prune_program_cache(bank.slot());
-        bank_forks
-            .write()
-            .unwrap()
-            .set_root(
-                bank.slot(),
-                Some(&test_environment.background_services.snapshot_controller),
-                None,
-            )
-            .unwrap();
+        bank_forks.write().unwrap().set_root(
+            bank.slot(),
+            &test_environment
+                .background_services
+                .accounts_background_request_sender,
+            None,
+        );
 
         // After submitting an EAH calculation request, wait until it gets handled by ABS so that
         // subsequent snapshot requests are not swallowed.
@@ -450,7 +454,9 @@ fn test_snapshots_have_expected_epoch_accounts_hash() {
                 &RuntimeConfig::default(),
                 None,
                 None,
+                AccountSecondaryIndexes::default(),
                 None,
+                AccountShrinkThreshold::default(),
                 true,
                 true,
                 false,
@@ -527,15 +533,13 @@ fn test_background_services_request_handling_for_epoch_accounts_hash() {
         if bank.block_height() == set_root_slot {
             info!("Calling set_root() on bank {}...", bank.slot());
             bank_forks.read().unwrap().prune_program_cache(bank.slot());
-            bank_forks
-                .write()
-                .unwrap()
-                .set_root(
-                    bank.slot(),
-                    Some(&test_environment.background_services.snapshot_controller),
-                    None,
-                )
-                .unwrap();
+            bank_forks.write().unwrap().set_root(
+                bank.slot(),
+                &test_environment
+                    .background_services
+                    .accounts_background_request_sender,
+                None,
+            );
             info!("Calling set_root() on bank {}... DONE", bank.slot());
 
             // wait until eah is valid
@@ -586,15 +590,13 @@ fn test_epoch_accounts_hash_and_warping() {
         epoch_schedule.get_first_slot_in_epoch(bank.epoch() + 1) + eah_stop_offset;
     // have to set root here so that we can flush the write cache
     bank_forks.read().unwrap().prune_program_cache(bank.slot());
-    bank_forks
-        .write()
-        .unwrap()
-        .set_root(
-            bank.slot(),
-            Some(&test_environment.background_services.snapshot_controller),
-            None,
-        )
-        .unwrap();
+    bank_forks.write().unwrap().set_root(
+        bank.slot(),
+        &test_environment
+            .background_services
+            .accounts_background_request_sender,
+        None,
+    );
     // flush the write cache so warping can calculate the accounts hash from storages
     bank.force_flush_accounts_cache();
     let bank = bank_forks
@@ -614,15 +616,13 @@ fn test_epoch_accounts_hash_and_warping() {
         .insert(Bank::new_from_parent(bank, &Pubkey::default(), slot))
         .clone_without_scheduler();
     bank_forks.read().unwrap().prune_program_cache(bank.slot());
-    bank_forks
-        .write()
-        .unwrap()
-        .set_root(
-            bank.slot(),
-            Some(&test_environment.background_services.snapshot_controller),
-            None,
-        )
-        .unwrap();
+    bank_forks.write().unwrap().set_root(
+        bank.slot(),
+        &test_environment
+            .background_services
+            .accounts_background_request_sender,
+        None,
+    );
     info!("Waiting for epoch accounts hash...");
     _ = bank
         .rc
@@ -656,15 +656,13 @@ fn test_epoch_accounts_hash_and_warping() {
         .insert(Bank::new_from_parent(bank, &Pubkey::default(), slot))
         .clone_without_scheduler();
     bank_forks.read().unwrap().prune_program_cache(bank.slot());
-    bank_forks
-        .write()
-        .unwrap()
-        .set_root(
-            bank.slot(),
-            Some(&test_environment.background_services.snapshot_controller),
-            None,
-        )
-        .unwrap();
+    bank_forks.write().unwrap().set_root(
+        bank.slot(),
+        &test_environment
+            .background_services
+            .accounts_background_request_sender,
+        None,
+    );
     info!("Waiting for epoch accounts hash...");
     _ = bank
         .rc
