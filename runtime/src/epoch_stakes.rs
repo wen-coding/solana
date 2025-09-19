@@ -174,6 +174,19 @@ impl VersionedEpochStakes {
         }
     }
 
+    pub fn bls_pubkey_to_rank_map(&self) -> &Arc<BLSPubkeyToRankMap> {
+        match self {
+            Self::Current {
+                bls_pubkey_to_rank_map,
+                ..
+            } => bls_pubkey_to_rank_map.get_or_init(|| {
+                Arc::new(BLSPubkeyToRankMap::new(
+                    self.stakes().vote_accounts().as_ref(),
+                ))
+            }),
+        }
+    }
+
     pub fn vote_account_stake(&self, vote_account: &Pubkey) -> u64 {
         self.stakes()
             .vote_accounts()
@@ -227,6 +240,7 @@ pub(crate) mod tests {
     use {
         super::*, solana_account::AccountSharedData, solana_vote::vote_account::VoteAccount,
         solana_vote_program::vote_state::create_account_with_authorized, std::iter,
+        test_case::test_case,
     };
 
     struct VoteAccountInfo {
@@ -367,5 +381,44 @@ pub(crate) mod tests {
                 Some(*stake * num_vote_accounts_per_node as u64)
             );
         }
+    }
+
+    #[test_case(1; "single_vote_account")]
+    #[test_case(2; "multiple_vote_accounts")]
+    fn test_bls_pubkey_rank_map(num_vote_accounts_per_node: usize) {
+        let num_nodes = 10;
+        let num_vote_accounts = num_nodes * num_vote_accounts_per_node;
+
+        let vote_accounts_map = new_vote_accounts(num_nodes, num_vote_accounts_per_node, true);
+        let node_id_to_stake_map = vote_accounts_map
+            .keys()
+            .enumerate()
+            .map(|(index, node_id)| (*node_id, ((index + 1) * 100) as u64))
+            .collect::<HashMap<_, _>>();
+        let epoch_vote_accounts = new_epoch_vote_accounts(&vote_accounts_map, |node_id| {
+            *node_id_to_stake_map.get(node_id).unwrap()
+        });
+        let epoch_stakes = VersionedEpochStakes::new_for_tests(epoch_vote_accounts.clone(), 0);
+        let bls_pubkey_to_rank_map = epoch_stakes.bls_pubkey_to_rank_map();
+        assert_eq!(bls_pubkey_to_rank_map.len(), num_vote_accounts);
+        for (pubkey, (_, vote_account)) in epoch_vote_accounts {
+            let index = bls_pubkey_to_rank_map
+                .get_rank(vote_account.bls_pubkey().unwrap())
+                .unwrap();
+            assert!(index >= &0 && index < &(num_vote_accounts as u16));
+            assert_eq!(
+                bls_pubkey_to_rank_map.get_pubkey(*index as usize),
+                Some(&(pubkey, *vote_account.bls_pubkey().unwrap()))
+            );
+        }
+
+        // Convert it to versioned and back, we should get the same rank map
+        let mut bank_epoch_stakes = HashMap::new();
+        bank_epoch_stakes.insert(0, epoch_stakes.clone());
+        let epoch_stakes = bank_epoch_stakes
+            .get(&0)
+            .expect("Epoch stakes should exist");
+        let bls_pubkey_to_rank_map2 = epoch_stakes.bls_pubkey_to_rank_map();
+        assert_eq!(bls_pubkey_to_rank_map2, bls_pubkey_to_rank_map);
     }
 }
