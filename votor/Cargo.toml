@@ -31,6 +31,7 @@ crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 itertools = { workspace = true }
 log = { workspace = true }
+lru = { workspace = true }
 parking_lot = { workspace = true }
 qualifier_attr = { workspace = true }
 rayon = { workspace = true }
@@ -40,7 +41,9 @@ serde_derive = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-bloom = { workspace = true }
 solana-bls-signatures = { workspace = true }
+solana-client = { workspace = true }
 solana-clock = { workspace = true }
+solana-connection-cache = { workspace = true }
 solana-entry = { workspace = true }
 solana-epoch-schedule = { workspace = true }
 solana-frozen-abi = { workspace = true, optional = true, features = [
@@ -62,8 +65,10 @@ solana-runtime = { workspace = true }
 solana-signature = { workspace = true }
 solana-signer = { workspace = true }
 solana-signer-store = { workspace = true }
+solana-streamer = { workspace = true }
 solana-time-utils = { workspace = true }
 solana-transaction = { workspace = true }
+solana-transaction-error = { workspace = true }
 solana-votor-messages = { workspace = true }
 thiserror = { workspace = true }
 
