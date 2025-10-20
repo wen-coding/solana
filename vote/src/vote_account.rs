@@ -633,10 +633,12 @@ mod tests {
         solana_account::WritableAccount,
         solana_clock::Clock,
         solana_pubkey::Pubkey,
-        solana_vote_interface::state::{
-            VoteInit, VoteStateV4, VoteStateVersions, BLS_PUBLIC_KEY_COMPRESSED_SIZE,
+        solana_vote_interface::{
+            authorized_voters::AuthorizedVoters,
+            state::{VoteInit, VoteStateV4, VoteStateVersions, BLS_PUBLIC_KEY_COMPRESSED_SIZE},
         },
         std::{collections::HashSet, iter::repeat_with},
+        test_case::test_case,
     };
 
     const MIN_STAKE_FOR_STAKED_ACCOUNT: u64 = 1;
@@ -661,10 +663,6 @@ mod tests {
             leader_schedule_epoch: rng.random(),
             unix_timestamp: rng.random(),
         };
-        let mut vote_state = VoteStateV4::new(&vote_pubkey, &vote_init, &clock);
-        if fill_bls_pubkey {
-            vote_state.bls_pubkey_compressed = Some([42; BLS_PUBLIC_KEY_COMPRESSED_SIZE]);
-        }
         AccountSharedData::new_data(
             rng.random(), // lamports
             &VoteStateVersions::new_v4(vote_state.clone()),
