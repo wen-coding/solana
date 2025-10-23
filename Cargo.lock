@@ -11797,7 +11797,6 @@ dependencies = [
  "solana-vote",
  "solana-vote-interface",
  "static_assertions",
- "test-case",
  "thiserror 2.0.17",
 ]
 
